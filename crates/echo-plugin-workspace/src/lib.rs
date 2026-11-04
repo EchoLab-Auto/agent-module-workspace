@@ -52,6 +52,31 @@ pub mod store;
 pub mod tool;
 pub mod wire;
 
+// ── 迁移兼容 re-export ────────────────────────────────────────────────────
+//
+// 宿主（EchoAgentCore）此前用 `echo_agent::workspace::X` 引用这些条目
+// （`pub use echo_plugin_workspace as workspace`）。插件迁仓后这些路径由本仓
+// 继续提供，宿主侧不必改调用点——只有真正属于宿主的接线（会话通道、广播）
+// 需要动。
+
+pub use files::{
+    browse_roots, collect_child_dirs, collect_dir_files, resolve_within_browse_roots,
+    resolve_within_directories, FILES_CAP,
+};
+pub use git::{collect_dir_git, CHANGED_FILES_CAP, GIT_TIMEOUT};
+pub use store::{
+    channel_scope_id, parse_workspace_channel, ConversationDeleteHook, WorkspaceStore,
+    MAX_DIRECTORIES,
+};
+pub use tool::{
+    call as tool_call, description as tool_description, execute as tool_execute,
+    parameters as tool_parameters, TOOL_NAME,
+};
+pub use wire::{
+    BrowseRoot, WorkspaceChangedEntry, WorkspaceConversationInfo, WorkspaceDirectory,
+    WorkspaceFileEntry, WorkspaceGitInfo, WorkspaceSessionInfo,
+};
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -76,7 +101,7 @@ pub mod events {
 }
 
 /// 插件配置（`plugins.toml` 的 `[plugin.config]`）。
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// 工作区文档落盘目录（`echo-workspaces-{team}.json` 放在这里）。
@@ -84,14 +109,6 @@ pub struct Config {
     /// 缺省 = `$XDG_CONFIG_HOME/echo-agent-core`（与 Core 迁出前的路径一致，
     /// 因此旧数据可直接读）。空串等价于缺省。
     pub state_dir: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            state_dir: String::new(),
-        }
-    }
 }
 
 impl Config {
@@ -343,6 +360,18 @@ pub fn manifest(version: &str) -> PluginManifest {
 
 /// 构造插件（宿主装配期调用一次；插件被禁用/未挂载时不监听、不落盘）。
 pub fn plugin(version: &str) -> Arc<dyn Plugin> {
+    plugin_with_state(version).0
+}
+
+/// 构造插件并交出内部状态句柄。
+///
+/// 两个用途：
+/// 1. **宿主测试**：需要直接观察/注入 store（如"预置一个激活工作区，再验证
+///    提示词块内容"）时，拿 `Arc<PluginState>` 比走一遍命令快得多；
+/// 2. **嵌入式集成**（可选）：宿主想把插件事件桥与自己的事件循环对齐。
+///
+/// 生产装配用 [`plugin`] 即可——状态是插件自己的事，宿主不该依赖它。
+pub fn plugin_with_state(version: &str) -> (Arc<dyn Plugin>, Arc<PluginState>) {
     let state = Arc::new(PluginState::default());
     // 变更钩子要靠自引用回调本状态（见 `attach_self`）。
     state.attach_self();
@@ -350,7 +379,7 @@ pub fn plugin(version: &str) -> Arc<dyn Plugin> {
     let command_state = state.clone();
     let text_state = state.clone();
 
-    Arc::new(
+    let built = Arc::new(
         BuiltinPlugin::new(manifest(version), move |ctx| {
             // 配置解析失败不该挡住启动：按缺省目录继续（与宿主的"配置缺失
             // 不阻断启动"同款取舍），但把可读错误留在日志里。
@@ -380,8 +409,17 @@ pub fn plugin(version: &str) -> Arc<dyn Plugin> {
             }
             Ok(Vec::new())
         })
-        // 命令域：7 条工作区命令由本插件处理（宿主分发时先问插件）。
-        .with_commands(commands::COMMANDS)
+        // 命令域：面板 7 条 + 宿主内部 2 条 + 工具入口 1 条。
+        //
+        // 工具入口必须一起声明：宿主的命令分发**只问声明过的名字**
+        // （`handled_commands`），漏了它 `WorkspaceToolCall` 永远到不了这里，
+        // 表现为"工具存在但每次都说插件未启用"。
+        .with_commands(
+            commands::COMMANDS
+                .iter()
+                .copied()
+                .chain(std::iter::once(commands::TOOL_CALL)),
+        )
         .with_command_handler_async(move |name, payload| {
             let state = command_state.clone();
             Box::pin(async move {
@@ -402,7 +440,8 @@ pub fn plugin(version: &str) -> Arc<dyn Plugin> {
             }
             text_state.prompt_text(context)
         }),
-    )
+    );
+    (built, state)
 }
 
 #[cfg(test)]

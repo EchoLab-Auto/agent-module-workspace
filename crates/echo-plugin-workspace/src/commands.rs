@@ -23,8 +23,12 @@ use crate::wire::{
 };
 use crate::PluginState;
 
-/// 本插件处理的 7 条命令（`Contribution::Command` 的 `name`）。
-pub const COMMANDS: [&str; 7] = [
+/// 本插件处理的命令（`Contribution::Command` 的 `name`）。
+///
+/// 前 7 条是**面板线协议命令**；后 2 条是**宿主内部命令**（面板不发它们）：
+/// 宿主原本直接调 store 的两个动作（会话级 API 覆盖的持久化、供应商改名传播）
+/// 现在跨了仓库边界，只能经命令通道回来。
+pub const COMMANDS: [&str; 9] = [
     "RequestWorkspaceSessions",
     "SaveWorkspaceSession",
     "DeleteWorkspaceSession",
@@ -32,6 +36,9 @@ pub const COMMANDS: [&str; 7] = [
     "RequestWorkspaceGitStatus",
     "RequestWorkspaceFiles",
     "RequestBrowseDirectories",
+    // ── 宿主内部命令（见模块文档）──
+    "WorkspaceSetConversationApiProfile",
+    "WorkspaceRenameApiProfile",
 ];
 
 /// `workspace` 工具的调用入口名（宿主把工具调用转发到这里）。
@@ -70,6 +77,10 @@ pub async fn handle(
         "RequestWorkspaceGitStatus" => git_status(state, team_id.as_deref(), &payload).await,
         "RequestWorkspaceFiles" => files_list(state, team_id.as_deref(), &payload).await,
         "RequestBrowseDirectories" => browse(state, &payload).await,
+        "WorkspaceSetConversationApiProfile" => {
+            set_conversation_api_profile(state, team_id.as_deref(), &payload)
+        }
+        "WorkspaceRenameApiProfile" => rename_api_profile(state, team_id.as_deref(), &payload),
         other => {
             return Some(Err(format!("命令 {other} 被声明但处理器没有认领它")));
         }
@@ -157,6 +168,56 @@ fn activate_session(
     mutate(state, team_id, move |store| {
         store.set_active(id, conversation).map(|()| message)
     })
+}
+
+/// 宿主内部：把会话级 API 覆盖写进对应工作区对话（`profile` 空 = 清除）。
+///
+/// 为什么是命令而不是让宿主直接写：store 在插件里（独立仓库），宿主只读镜像，
+/// 写入必须回到唯一写者。`session_id` 是**工作区通道** id
+/// （`local:workspace:<ws>[/<conv>]:<user>`），解析规则同插件侧。
+fn set_conversation_api_profile(
+    state: &PluginState,
+    team_id: Option<&str>,
+    payload: &Value,
+) -> Result<Value, String> {
+    let session_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "WorkspaceSetConversationApiProfile 缺少 session_id".to_string())?;
+    let profile = payload
+        .get("profile")
+        .and_then(|v| v.as_str())
+        .filter(|p| !p.is_empty());
+    let Some((ws_id, conv_id)) = crate::store::parse_workspace_channel(session_id) else {
+        // 非工作区通道：静默成功（宿主侧也是"直接跳过"）。
+        return Ok(Value::Null);
+    };
+    let store = store_or_err(state, team_id)?;
+    match conv_id.as_deref() {
+        Some(conv_id) => store.set_conversation_api_profile(&ws_id, conv_id, profile)?,
+        // legacy 裸通道：按 `legacy == true` 定位（不猜 id=="main"）。
+        None => store.set_legacy_conversation_api_profile(&ws_id, profile)?,
+    };
+    Ok(Value::Null)
+}
+
+/// 宿主内部：供应商改名后传播到全部工作区对话的 `api_profile` 引用。
+fn rename_api_profile(
+    state: &PluginState,
+    team_id: Option<&str>,
+    payload: &Value,
+) -> Result<Value, String> {
+    let from = payload
+        .get("from")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "WorkspaceRenameApiProfile 缺少 from".to_string())?;
+    let to = payload
+        .get("to")
+        .and_then(|v| v.as_str())
+        .filter(|t| !t.is_empty());
+    let store = store_or_err(state, team_id)?;
+    let changed = store.rename_api_profile(from, to)?;
+    Ok(json!({ "changed": changed }))
 }
 
 /// 变更类命令的公共骨架：取 store → 执行 → 回执。
