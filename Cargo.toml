@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/echo-plugin-workspace"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/EchoLab-Auto/echo-plugin-workspace"
+
+[workspace.dependencies]
+# 框架仓（插件 trait / 挂载上下文）。与 EchoAgentCore 根 Cargo.toml 保持同一
+# tag，避免同一进程里出现两份框架类型（Box<dyn Plugin> 不跨版本兼容）。
+echo-plugin = { git = "https://github.com/EchoLab-Auto/echo-fabric-arch", tag = "v0.11.2" }
+echo-context = { git = "https://github.com/EchoLab-Auto/echo-fabric-arch", tag = "v0.11.2" }
+# 本机验证用（`cargo test` 前取消注释）：
+# echo-plugin = { path = "/home/evence/code_file/gitlab/echo-tech/echo-fabric-arch/crates/echo-plugin" }
+# echo-context = { path = "/home/evence/code_file/gitlab/echo-tech/echo-fabric-arch/crates/echo-context" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
+tracing = "0.1"

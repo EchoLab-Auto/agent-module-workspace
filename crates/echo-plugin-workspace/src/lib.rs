@@ -1,0 +1,499 @@
+//! # echo-plugin-workspace — 工作区会话插件（独立交付）
+//!
+//! 工作区会话 = 用户从 Panel 管理的一组工作目录（创建 / 改名 / 删除 / 激活），
+//! 可逐目录查看 `git status`、浏览文件、选择目录。激活会话的目录会注入系统
+//! 提示词，让模型知道自己该在哪里干活；`workspace` 工具把 list / status /
+//! use / create / delete / conversations 暴露给模型。
+//!
+//! ## 与宿主的关系（本仓能独立存在的原因）
+//!
+//! 本插件**不依赖 EchoAgentCore 的任何 crate**，只依赖框架仓 `echo-fabric-arch`
+//! 的 `echo-plugin` / `echo-context`。这不是洁癖，而是硬约束：Core 以 git 依赖
+//! 引入本仓，本仓若再依赖 Core 的 crate 就是**包级循环依赖**，Cargo 直接拒绝。
+//!
+//! 代价与对策：
+//!
+//! | 原本依赖的 | 现在 |
+//! |---|---|
+//! | `echo-protocol` 的线类型 | [`wire`] 里的镜像（字段名逐字一致） |
+//! | 宿主的 `WorkspaceStore` | [`store`] 自己拥有（per-persona，原子落盘） |
+//! | 宿主的 `emit` / 会话通道 | 向宿主发**插件事件**（见下） |
+//! | 联邦 `remote_query` | 远程目录降级为「不可采集」占位（见 README 的能力边界） |
+//!
+//! ## 插件事件协议（本仓 → 宿主）
+//!
+//! 插件通过 `MountContext::emit` 发三类事件，宿主订阅后翻译成会话子系统的
+//! 动作。这是"插件负责语义、宿主负责路由"的分界：
+//!
+//! - `workspace.backend_event` — 载荷就是要发给前端的 `BackendEvent` JSON
+//!   （外部标签形状，如 `{"WorkspaceSessions": {…}}`）。宿主反序列化后原样 emit。
+//! - `workspace.changed` — `{ team_id, active, active_conversation, sessions }`。
+//!   宿主负责：active 存在时确保工作区会话通道已注册（会话名 = 工作区名 +
+//!   对话名）、推 `SessionUpdated`、广播 `WorkspaceSessions`。**这些是宿主的
+//!   会话子系统，插件不认识它们**——插件只报告"状态变了"。
+//! - `workspace.conversation_deleted` — `{ team_id, workspace_id, conversation }`。
+//!   宿主负责清空该对话的通道历史（事件日志 / 投影 / 时间线）。
+//!
+//! ## 启用
+//!
+//! 由宿主（EchoAgentCore）以 `kind = "builtin"` 挂载；插件本身零参数——
+//! 需要的一切（落盘目录）来自 `[plugin.config]`：
+//!
+//! ```toml
+//! [plugin.config]
+//! state_dir = "/home/me/.config/echo-agent-core"   # 缺省 = $XDG_CONFIG_HOME/echo-agent-core
+//! ```
+
+pub mod commands;
+pub mod files;
+pub mod git;
+pub mod prompt;
+pub mod store;
+pub mod tool;
+pub mod wire;
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+
+use echo_plugin::{BuiltinPlugin, Plugin, PluginManifest, PluginTextBlock};
+use serde_json::{json, Value};
+
+/// 插件 id（**唯一真值**在这里；宿主的 `WORKSPACE_PLUGIN_ID` 是它的别名）。
+pub const PLUGIN_ID: &str = "echo-agent.workspace";
+
+/// 提示词块键（宿主按 key 定位块，`order = 50` 与迁移前一致）。
+pub const TEXT_BLOCK_KEY: &str = "workspace";
+
+/// 插件事件名（见模块文档）。
+pub mod events {
+    /// 载荷 = 要发给前端的 `BackendEvent` JSON。
+    pub const BACKEND_EVENT: &str = "workspace.backend_event";
+    /// 工作区状态变更（宿主据ensure 通道 + 广播列表）。
+    pub const CHANGED: &str = "workspace.changed";
+    /// 对话被删除（宿主据此清空该对话的通道历史）。
+    pub const CONVERSATION_DELETED: &str = "workspace.conversation_deleted";
+}
+
+/// 插件配置（`plugins.toml` 的 `[plugin.config]`）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Config {
+    /// 工作区文档落盘目录（`echo-workspaces-{team}.json` 放在这里）。
+    ///
+    /// 缺省 = `$XDG_CONFIG_HOME/echo-agent-core`（与 Core 迁出前的路径一致，
+    /// 因此旧数据可直接读）。空串等价于缺省。
+    pub state_dir: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            state_dir: String::new(),
+        }
+    }
+}
+
+impl Config {
+    /// 解析生效的落盘目录（配置为空时回退 XDG / HOME）。
+    pub fn effective_state_dir(&self) -> PathBuf {
+        if !self.state_dir.trim().is_empty() {
+            return PathBuf::from(self.state_dir.trim());
+        }
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| Path::new(&home).join(".config"))
+            })
+            .unwrap_or_else(|| PathBuf::from("."));
+        base.join("echo-agent-core")
+    }
+
+    /// 某个 persona 的文档路径。
+    pub fn document_path(&self, team_id: &str) -> PathBuf {
+        self.effective_state_dir()
+            .join(format!("echo-workspaces-{team_id}.json"))
+    }
+}
+
+/// 插件运行期状态（进程级单例：插件被 unmount/remount 时 store 不丢）。
+///
+/// store 的内容本身在磁盘上，这里只是内存视图 + 事件出口；因此重建实例
+/// （`mount` 再来一次）不会丢数据，只会重新读盘。
+pub struct PluginState {
+    config: RwLock<Config>,
+    stores: RwLock<HashMap<String, Arc<store::WorkspaceStore>>>,
+    /// 宿主注入的事件出口（`MountContext::events`）。
+    emit: RwLock<Option<echo_plugin::EventSink>>,
+    /// 自引用（弱）：store 的变更钩子需要回调本状态，而本状态持有 store。
+    /// 用 `Weak` 断开这条环，钩子在插件被卸载后自然失效。
+    self_ref: RwLock<std::sync::Weak<PluginState>>,
+}
+
+impl std::fmt::Debug for PluginState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let teams = self.stores.read().map(|s| s.len()).unwrap_or(0);
+        f.debug_struct("PluginState")
+            .field("teams", &teams)
+            .field(
+                "state_dir",
+                &self.config.read().map(|c| c.effective_state_dir()).ok(),
+            )
+            .finish()
+    }
+}
+
+impl Default for PluginState {
+    fn default() -> Self {
+        Self::new(Config::default())
+    }
+}
+
+impl PluginState {
+    /// 用配置构造。
+    pub fn new(config: Config) -> Self {
+        Self {
+            config: RwLock::new(config),
+            stores: RwLock::new(HashMap::new()),
+            emit: RwLock::new(None),
+            self_ref: RwLock::new(std::sync::Weak::new()),
+        }
+    }
+
+    /// 建立自引用（构造 `Arc` 之后调用一次）。
+    ///
+    /// 没有它，store 的变更钩子就拿不到本状态（钩子要回调 `on_store_changed`）；
+    /// 而让钩子直接持有 `Arc<PluginState>` 会形成
+    /// `state → store → hook → state` 的强引用环，插件卸载后永不释放。
+    pub fn attach_self(self: &Arc<Self>) {
+        *self.self_ref.write().unwrap_or_else(|e| e.into_inner()) = Arc::downgrade(self);
+    }
+    /// 当前配置快照。
+    pub fn config(&self) -> Config {
+        self.config
+            .read()
+            .map(|c| c.clone())
+            .unwrap_or_else(|e| e.into_inner().clone())
+    }
+
+    /// 覆盖配置（`mount` 时由 `plugins.toml` 注入）。
+    pub fn set_config(&self, config: Config) {
+        *self.config.write().unwrap_or_else(|e| e.into_inner()) = config;
+    }
+
+    /// 注入事件出口（`mount` 时一次）。
+    pub fn set_event_sink(&self, sink: echo_plugin::EventSink) {
+        *self.emit.write().unwrap_or_else(|e| e.into_inner()) = Some(sink);
+    }
+
+    /// 发一条插件事件（无出口时静默丢弃——单测/裸装配场景）。
+    pub fn emit_event(&self, name: &str, payload: Value) {
+        let sink = self
+            .emit
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().cloned());
+        if let Some(sink) = sink {
+            sink(echo_plugin::PluginEvent::new(PLUGIN_ID, name, payload));
+        }
+    }
+
+    /// 发一条「要送到前端的后端事件」（载荷是 `BackendEvent` 的 JSON 形状）。
+    pub fn emit_backend(&self, event: Value) {
+        self.emit_event(events::BACKEND_EVENT, event);
+    }
+
+    /// 发一条错误事件（`BackendEvent::Error` 的线形状）。
+    pub fn emit_error(&self, session_id: Option<&str>, message: impl Into<String>) {
+        self.emit_backend(json!({
+            "Error": {
+                "session_id": session_id,
+                "message": message.into(),
+            }
+        }));
+    }
+
+    /// 某个 persona 的 store（惰性创建：首次访问时读盘 + 接变更钩子）。
+    pub fn store(&self, team_id: &str) -> Arc<store::WorkspaceStore> {
+        if let Some(existing) = self
+            .stores
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(team_id)
+        {
+            return existing.clone();
+        }
+        let config = self.config();
+        let store = Arc::new(store::WorkspaceStore::load(Some(
+            config.document_path(team_id),
+        )));
+        // 「store 变更 → 广播」的唯一入口（面板命令与模型 `use` 工具共用）。
+        // 钩子持 `Weak`：见 [`PluginState::attach_self`] 的说明。
+        {
+            let weak = self
+                .self_ref
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let team_id = team_id.to_string();
+            store.set_on_change(Arc::new(move || {
+                if let Some(state) = weak.upgrade() {
+                    state.on_store_changed(&team_id);
+                }
+            }));
+        }
+        {
+            let weak = self
+                .self_ref
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let team_id = team_id.to_string();
+            store.set_on_conversation_deleted(Arc::new(move |workspace_id, conversation| {
+                if let Some(state) = weak.upgrade() {
+                    state.emit_event(
+                        events::CONVERSATION_DELETED,
+                        json!({
+                            "team_id": team_id,
+                            "workspace_id": workspace_id,
+                            "conversation": conversation,
+                        }),
+                    );
+                }
+            }));
+        }
+        self.stores
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(team_id.to_string(), store.clone());
+        store
+    }
+
+    /// store 变更 → 报告宿主（由宿主完成通道注册与列表广播）。
+    ///
+    /// 钩子在 store 的写锁**之外**触发，所以这里可以安全地回读同一份 store。
+    fn on_store_changed(&self, team_id: &str) {
+        let store = self.store(team_id);
+        let (sessions, active) = store.snapshot();
+        let active_conversation = store.active_pair().map(|(_, conv)| conv.id);
+        self.emit_event(
+            events::CHANGED,
+            json!({
+                "team_id": team_id,
+                "active": active,
+                "active_conversation": active_conversation,
+                "sessions": sessions,
+            }),
+        );
+    }
+
+    /// 全部 persona 的 store 快照（目录选择器要跨 persona 取目录并集）。
+    pub fn all_stores(&self) -> Vec<Arc<store::WorkspaceStore>> {
+        self.stores
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// 已加载过的 team id（诊断/测试用）。
+    pub fn loaded_teams(&self) -> Vec<String> {
+        self.stores
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// 提示词块内容（`context` 带 `team_id` / `session_id`，由宿主注入）。
+    pub fn prompt_text(&self, context: &Value) -> Option<String> {
+        let team_id = context
+            .get("team_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if team_id.is_empty() {
+            return None;
+        }
+        let store = self.store(team_id);
+        // 按**本次 turn 的会话**解析，回退全局 active——否则 A 窗口激活工作区
+        // 后，B 窗口在自己通道里发消息会被注入 A 的工作区上下文（多窗口串台）。
+        match context.get("session_id").and_then(|v| v.as_str()) {
+            Some(session_id) if !session_id.is_empty() => store
+                .prompt_text_for(session_id)
+                .or_else(|| store.prompt_text()),
+            _ => store.prompt_text(),
+        }
+    }
+}
+
+/// 插件 manifest（id / 名称 / 描述的唯一事实来源）。
+pub fn manifest(version: &str) -> PluginManifest {
+    PluginManifest::builtin(
+        PLUGIN_ID,
+        "工作区会话",
+        version,
+        "tool",
+        "workspace",
+        "基于工作空间的会话管理：Panel 多会话/多目录管理 + git 状态查看 + workspace 工具",
+    )
+}
+
+/// 构造插件（宿主装配期调用一次；插件被禁用/未挂载时不监听、不落盘）。
+pub fn plugin(version: &str) -> Arc<dyn Plugin> {
+    let state = Arc::new(PluginState::default());
+    // 变更钩子要靠自引用回调本状态（见 `attach_self`）。
+    state.attach_self();
+    let mount_state = state.clone();
+    let command_state = state.clone();
+    let text_state = state.clone();
+
+    Arc::new(
+        BuiltinPlugin::new(manifest(version), move |ctx| {
+            // 配置解析失败不该挡住启动：按缺省目录继续（与宿主的"配置缺失
+            // 不阻断启动"同款取舍），但把可读错误留在日志里。
+            let config: Config = if ctx.config().is_null() {
+                Config::default()
+            } else {
+                match serde_json::from_value(ctx.config().clone()) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        tracing::warn!(
+                            plugin = PLUGIN_ID,
+                            %error,
+                            "workspace 插件配置解析失败，按缺省目录继续"
+                        );
+                        Config::default()
+                    }
+                }
+            };
+            tracing::info!(
+                plugin = PLUGIN_ID,
+                state_dir = %config.effective_state_dir().display(),
+                "workspace 插件已挂载"
+            );
+            mount_state.set_config(config);
+            if let Some(sink) = &ctx.events {
+                mount_state.set_event_sink(sink.clone());
+            }
+            Ok(Vec::new())
+        })
+        // 命令域：7 条工作区命令由本插件处理（宿主分发时先问插件）。
+        .with_commands(commands::COMMANDS)
+        .with_command_handler_async(move |name, payload| {
+            let state = command_state.clone();
+            Box::pin(async move {
+                // `with_commands` 声明过的名字宿主管道才会调过来；`handle`
+                // 仍按"认领语义"返回 `Option`（工具调用与未来扩展共用同一入口），
+                // 这里把 `None` 兜成明确错误，避免面板转圈。
+                match commands::handle(&state, &name, payload).await {
+                    Some(outcome) => outcome,
+                    None => Err(format!("命令 {name} 未被 workspace 插件认领")),
+                }
+            })
+        })
+        // 提示词块：键 / 标题 / 顺序与迁移前一致（order = 50）。
+        .with_text_blocks([PluginTextBlock::new(TEXT_BLOCK_KEY, "工作区会话", 50)])
+        .with_text_block_content(move |key, context| {
+            if key != TEXT_BLOCK_KEY {
+                return None;
+            }
+            text_state.prompt_text(context)
+        }),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 配置缺省：落到 `$XDG_CONFIG_HOME/echo-agent-core`，文档名与迁移前一致
+    /// （旧数据可直接读）。
+    #[test]
+    fn default_state_dir_matches_core_layout() {
+        let config = Config::default();
+        let dir = config.effective_state_dir();
+        assert!(dir.ends_with("echo-agent-core"), "{dir:?}");
+        assert_eq!(
+            config.document_path("assistant").file_name().unwrap(),
+            "echo-workspaces-assistant.json"
+        );
+    }
+
+    #[test]
+    fn explicit_state_dir_wins() {
+        let config = Config {
+            state_dir: "/tmp/echo-ws-state".into(),
+        };
+        assert_eq!(
+            config.document_path("t"),
+            PathBuf::from("/tmp/echo-ws-state/echo-workspaces-t.json")
+        );
+    }
+
+    /// 提示词块：没有 team_id 不贡献内容（进程级插件服务多个人格，
+    /// 缺人格就无法定位 store）。
+    #[test]
+    fn prompt_block_requires_team_id() {
+        let state = PluginState::default();
+        assert!(state.prompt_text(&json!({})).is_none());
+        assert!(state
+            .prompt_text(&json!({"team_id": "", "session_id": "s"}))
+            .is_none());
+    }
+
+    /// 变更钩子 → `workspace.changed` 事件（宿主据此广播列表）。
+    #[test]
+    fn store_change_emits_changed_event() {
+        let dir = std::env::temp_dir().join(format!("echo-ws-plugin-hook-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = Arc::new(PluginState::new(Config {
+            state_dir: dir.to_string_lossy().into_owned(),
+        }));
+        state.attach_self();
+        let seen: Arc<std::sync::Mutex<Vec<(String, Value)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let seen = seen.clone();
+            state.set_event_sink(Arc::new(move |event| {
+                seen.lock().unwrap().push((event.name, event.payload));
+            }));
+        }
+        let store = state.store("assistant");
+        store
+            .upsert(wire::WorkspaceSessionInfo {
+                id: "proj".into(),
+                name: "Proj".into(),
+                directories: vec![wire::WorkspaceDirectory::local("/srv/a")],
+                ..Default::default()
+            })
+            .unwrap();
+        let recorded = seen.lock().unwrap().clone();
+        let changed = recorded
+            .iter()
+            .find(|(name, _)| name == events::CHANGED)
+            .expect("应发出 workspace.changed");
+        assert_eq!(changed.1["team_id"], "assistant");
+        assert_eq!(changed.1["sessions"][0]["id"], "proj");
+        assert!(changed.1["active"].is_null(), "未激活");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// store 是进程级单例：同一 team 反复取到同一个实例（不会重复读盘，
+    /// 也不会出现两份内存视图互相覆盖）。
+    #[test]
+    fn store_is_cached_per_team() {
+        let dir = std::env::temp_dir().join(format!("echo-ws-plugin-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = PluginState::new(Config {
+            state_dir: dir.to_string_lossy().into_owned(),
+        });
+        let a = state.store("t1");
+        let b = state.store("t1");
+        assert!(Arc::ptr_eq(&a, &b));
+        assert_eq!(state.loaded_teams(), vec!["t1".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
