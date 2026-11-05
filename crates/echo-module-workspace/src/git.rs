@@ -1,6 +1,6 @@
 //! 只读 git 采集（带硬超时）。
 //!
-//! 从 Core 内置插件原样搬出：行为、超时、明细配额、porcelain 解析都未改。
+//! 从 Core 内置模块原样搬出：行为、超时、明细配额、porcelain 解析都未改。
 //! 唯一的变化是类型来自 [`crate::wire`]。
 
 use std::process::{Command, Stdio};

@@ -42,8 +42,8 @@ dependencies = [
 
 [[package]]
 name = "echo-context"
-version = "0.14.0"
-source = "git+https://github.com/EchoLab-Auto/echo-fabric-arch?tag=v0.14.0#0da765be37df2ddb864e991adfa16bfec5a67237"
+version = "0.15.0"
+source = "git+https://github.com/EchoLab-Auto/echo-fabric-arch?tag=v0.15.0#a0f16e09c58e8912c1d7b7206651172b0fee6274"
 dependencies = [
  "dashmap",
  "thiserror",
@@ -51,9 +51,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "echo-plugin"
-version = "0.14.0"
-source = "git+https://github.com/EchoLab-Auto/echo-fabric-arch?tag=v0.14.0#0da765be37df2ddb864e991adfa16bfec5a67237"
+name = "echo-module"
+version = "0.15.0"
+source = "git+https://github.com/EchoLab-Auto/echo-fabric-arch?tag=v0.15.0#a0f16e09c58e8912c1d7b7206651172b0fee6274"
 dependencies = [
  "echo-context",
  "serde",
@@ -64,11 +64,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "echo-plugin-workspace"
+name = "echo-module-workspace"
 version = "0.1.0"
 dependencies = [
  "echo-context",
- "echo-plugin",
+ "echo-module",
  "serde",
  "serde_json",
  "tokio",

@@ -52,7 +52,7 @@ pub fn resolve_within_directories(
 
 /// 目录选择器的**浏览根**：家目录在首位，其后是各工作区目录（去重）。
 ///
-/// `directories` 是**全部 persona** 的目录并集（插件自己拥有所有 store，
+/// `directories` 是**全部 persona** 的目录并集（模块自己拥有所有 store，
 /// 因此不需要宿主代劳）；`labels` 用于把目录映射成人类可读标签。
 pub fn browse_roots(
     directories: &[WorkspaceDirectory],

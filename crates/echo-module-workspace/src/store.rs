@@ -1,8 +1,8 @@
 //! 工作区会话存储（每个 persona 一份 JSON，原子写）。
 //!
-//! 本模块是从 Core 内置插件原样搬出来的**业务核心**：会话 / 对话的增删改查、
+//! 本模块是从 Core 内置模块原样搬出来的**业务核心**：会话 / 对话的增删改查、
 //! 激活标记、通道 id 派生、持久化。它与宿主的唯一联系是 [`ChangeHook`]——
-//! 变更成功后触发一次，由插件装配层接成「向宿主发事件」（见 `lib.rs`）。
+//! 变更成功后触发一次，由模块装配层接成「向宿主发事件」（见 `lib.rs`）。
 //!
 //! 与 Core 版本的区别只有一处：不再依赖 `echo-protocol` 的类型，改用
 //! [`crate::wire`] 的线镜像（见该模块文档：包级循环依赖所致）。
@@ -35,7 +35,7 @@ pub type ChangeHook = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
 
 /// 对话删除钩子：删除成功后触发，参数 = (工作区 id, 被删对话)。
 ///
-/// 宿主据此清空该对话的通道历史（事件日志 / 投影 / 时间线）。插件不认识
+/// 宿主据此清空该对话的通道历史（事件日志 / 投影 / 时间线）。模块不认识
 /// "通道历史"这件事，只负责把事实通知出去。
 pub type ConversationDeleteHook =
     std::sync::Arc<dyn Fn(&str, &WorkspaceConversationInfo) + Send + Sync + 'static>;
@@ -150,9 +150,10 @@ impl WorkspaceStore {
             // untagged 线格式下面板仍发纯字符串数组，在这里解析为远程目录。
             let (node, path_raw) = match raw.path().strip_prefix("node://") {
                 Some(rest) => match rest.split_once('/') {
-                    Some((p, r)) if !p.is_empty() => {
-                        (Some(p.to_string()), format!("/{}", r.trim_start_matches('/')))
-                    }
+                    Some((p, r)) if !p.is_empty() => (
+                        Some(p.to_string()),
+                        format!("/{}", r.trim_start_matches('/')),
+                    ),
                     _ => (None, raw.path().to_string()),
                 },
                 None => (raw.node().map(str::to_string), raw.path().to_string()),
@@ -378,7 +379,12 @@ impl WorkspaceStore {
                 return Err(format!("工作区会话 {ws_id} 不存在"));
             };
             materialize_conversations(session);
-            match session.conversations.iter().find(|c| c.id == conv_id).cloned() {
+            match session
+                .conversations
+                .iter()
+                .find(|c| c.id == conv_id)
+                .cloned()
+            {
                 None => None,
                 Some(removed_conv) => {
                     session.conversations.retain(|c| c.id != conv_id);
@@ -551,9 +557,7 @@ fn normalize_directory(raw: &str) -> String {
 /// 对话读取视图：空列表（旧档/新建工作区）惰性补位存量主对话——
 /// `legacy: true` 表示其通道 id 为裸 ws 格式 `local:workspace:<ws>:<user>`
 ///（旧数据的历史挂在该 id 下，事件日志 append-only 不可改写）。
-pub(crate) fn conversations_view(
-    session: &WorkspaceSessionInfo,
-) -> Vec<WorkspaceConversationInfo> {
+pub(crate) fn conversations_view(session: &WorkspaceSessionInfo) -> Vec<WorkspaceConversationInfo> {
     if session.conversations.is_empty() {
         vec![WorkspaceConversationInfo {
             id: "main".into(),
@@ -646,7 +650,7 @@ mod tests {
 
     fn temp_store(name: &str) -> (std::sync::Arc<WorkspaceStore>, PathBuf) {
         let path = std::env::temp_dir().join(format!(
-            "echo-workspace-plugin-test-{}-{name}.json",
+            "echo-workspace-module-test-{}-{name}.json",
             std::process::id()
         ));
         std::fs::remove_file(&path).ok();
@@ -791,13 +795,21 @@ mod tests {
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         let _ = store.snapshot();
         let _ = store.prompt_text();
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1, "读不触发");
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "读不触发"
+        );
         store.set_active(Some("p".into()), None).unwrap();
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
         store.set_active(None, None).unwrap();
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
         assert!(store.set_active(Some("nope".into()), None).is_err());
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3, "无效操作不触发");
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "无效操作不触发"
+        );
         std::fs::remove_file(&path).ok();
     }
 

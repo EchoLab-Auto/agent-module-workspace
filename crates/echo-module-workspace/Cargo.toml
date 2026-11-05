@@ -1,6 +1,6 @@
 [package]
-name = "echo-plugin-workspace"
-description = "工作区会话插件：多会话 / 多目录管理 + git 状态 + workspace 工具（独立交付）"
+name = "echo-module-workspace"
+description = "工作区会话模块：多会话 / 多目录管理 + git 状态 + workspace 工具（独立交付）"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-echo-plugin.workspace = true
+echo-module.workspace = true
 echo-context.workspace = true
 
 serde.workspace = true

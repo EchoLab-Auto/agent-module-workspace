@@ -70,7 +70,10 @@ mod tests {
         let text = render_prompt_text(&session, &conv);
         assert!(text.contains("[remote:gpu-box]"), "text: {text}");
         assert!(text.contains("node://gpu-box/srv/repo"), "text: {text}");
-        assert!(text.contains("node://gpu-box/<绝对路径>"), "操作说明: {text}");
+        assert!(
+            text.contains("node://gpu-box/<绝对路径>"),
+            "操作说明: {text}"
+        );
         assert!(text.contains("- /srv/local\n"), "本机目录不带标注: {text}");
         assert!(text.contains("当前对话：主对话"), "text: {text}");
     }

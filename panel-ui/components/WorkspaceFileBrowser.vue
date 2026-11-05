@@ -1,5 +1,5 @@
 <script setup lang="ts">
-//! 工作区文件浏览器（workspace 插件）：只读浏览选中会话的工作区目录。
+//! 工作区文件浏览器（workspace 模块）：只读浏览选中会话的工作区目录。
 //!
 //! 按需加载：展开目录时向 Core 发 `RequestWorkspaceFiles`，Core 以
 //! `WorkspaceFiles` 事件回推条目（目录在前、文件在后，隐藏项跳过）。

@@ -10,7 +10,7 @@ Git 状态卡、工作区通道标签与多窗口激活规则。Panel 仓本身�
   --ui-extension /path/to/crate-workspace/panel-ui
 ```
 
-Core 后端插件和 Panel UI 扩展是两项独立部署选择。只装 UI 而 Core 未挂载插件时，扩展
+Core 后端模块和 Panel UI 扩展是两项独立部署选择。只装 UI 而 Core 未挂载模块时，扩展
 通过 team 能力隐藏入口；只装后端而不装 UI 时，工具仍可由模型调用，但 Panel 不出现
 工作区管理界面。
 

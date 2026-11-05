@@ -1,10 +1,10 @@
 # crate-workspace
 
-工作区会话插件（EchoAgent 插件，**独立仓库交付**）。
+工作区会话模块（EchoAgent 模块，**独立仓库交付**）。
 
-仓库名 `crate-workspace`；Rust crate 名仍为 `echo-plugin-workspace`。
+仓库名 `crate-workspace`；Rust crate 名仍为 `echo-module-workspace`。
 
-从 `EchoAgentCore` 的内置插件 `source/plugin/echo-plugin-workspace` 迁出。业务逻辑
+从 `EchoAgentCore` 的内置模块 `source/module/echo-module-workspace` 迁出。业务逻辑
 （store / git 采集 / 文件浏览 / 提示词文案 / 命令域 / 工具）全部在本仓；Core 只保留
 通用接线（见「宿主侧接线」）。
 
@@ -22,28 +22,28 @@
 1. Core 的 `Cargo.toml` 加依赖：
 
    ```toml
-   echo-plugin-workspace = { git = "https://github.com/EchoLab-Auto/crate-workspace", branch = "main" }
+   echo-module-workspace = { git = "https://github.com/EchoLab-Auto/crate-workspace", branch = "main" }
    ```
 
-2. 内置插件目录登记（`builtin_plugins.rs`）：
+2. 内置模块目录登记（`builtin_modules.rs`）：
 
    ```rust
-   push_plugin(&mut catalog, echo_plugin_workspace::plugin(version))?;
+   push_module(&mut catalog, echo_module_workspace::module(version))?;
    ```
 
-3. `plugins.toml` 可给它配置落盘目录（省略 = `$XDG_CONFIG_HOME/echo-agent-core`）：
+3. `modules.toml` 可给它配置落盘目录（省略 = `$XDG_CONFIG_HOME/echo-agent-core`）：
 
    ```toml
-   [[plugin]]
+   [[module]]
    id = "echo-agent.workspace"
    kind = "builtin"
    name = "工作区会话"
 
-   [plugin.config]
+   [module.config]
    # state_dir = "/home/me/.config/echo-agent-core"
    ```
 
-4. **订阅插件事件**，翻译成宿主的会话子系统动作（否则面板看到的列表不会刷新、
+4. **订阅模块事件**，翻译成宿主的会话子系统动作（否则面板看到的列表不会刷新、
    激活也不会建通道）：
 
    | 事件 | 载荷 | 宿主该做什么 |
@@ -52,11 +52,11 @@
    | `workspace.changed` | `{team_id, active, active_conversation, sessions}` | active 存在时确保工作区会话通道已注册（会话名 = 工作区名 + 对话名）、推 `SessionUpdated`、广播 `WorkspaceSessions` |
    | `workspace.conversation_deleted` | `{team_id, workspace_id, conversation}` | 清空该对话的通道历史（事件日志 / 投影 / 时间线） |
 
-5. **注册工具**：用 `echo_plugin_workspace::tool::{TOOL_NAME, description(),
+5. **注册工具**：用 `echo_module_workspace::tool::{TOOL_NAME, description(),
    parameters()}` 建一个转发型 `Tool`，`execute` 时把参数 + `team_id` 交给
 
    ```rust
-   plugin_host.dispatch_raw(
+   module_host.dispatch_raw(
        "WorkspaceToolCall",
        serde_json::json!({ "team_id": team_id, "operation": ... }),
    )
@@ -77,7 +77,7 @@
 降级原因：跨机查询用的是宿主的联邦能力（`echo-defs::workspace::RemoteWorkspaceQuery`
 → 联邦 `Invoke`），而本仓**不依赖 Core 的任何 crate**（Core 以 git 依赖引入本仓，
 反向依赖就是包级循环，Cargo 拒绝）。单机部署完全不受影响；多机部署要在宿主侧补一个
-「远程目录代理」（可做成宿主订阅的另一个插件事件，属后续工作）。
+「远程目录代理」（可做成宿主订阅的另一个模块事件，属后续工作）。
 
 ## Panel UI
 
@@ -90,9 +90,9 @@ cargo test          # 32 个用例（store / git / files / prompt / wire / 命�
 cargo clippy --all-targets -- -D warnings
 ```
 
-框架类型（`echo-plugin` / `echo-context`）按 tag `v0.14.0` 取自
+框架类型（`echo-module` / `echo-context`）按 tag `v0.14.0` 取自
 `echo-fabric-arch`，与 Core 根 `Cargo.toml` 保持同一 tag——同一进程里不能出现两份
-`Box<dyn Plugin>`。本地联调框架改动时，把这两个依赖临时换成 `path` 即可。
+`Box<dyn Module>`。本地联调框架改动时，把这两个依赖临时换成 `path` 即可。
 
 ## 许可
 

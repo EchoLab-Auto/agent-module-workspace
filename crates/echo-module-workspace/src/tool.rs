@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use crate::store;
 use crate::wire::{WorkspaceConversationInfo, WorkspaceSessionInfo};
-use crate::PluginState;
+use crate::ModuleState;
 
 /// 工具名（宿主据此注册）。
 pub const TOOL_NAME: &str = "workspace";
@@ -79,7 +79,7 @@ pub fn parameters() -> Value {
 ///
 /// `payload` 是模型给的工具参数对象；`ctx` 里的 `team_id` 由宿主经
 /// `InvokeContext`（或命令载荷）注入——见 [`crate::commands::handle`]。
-pub async fn call(state: &Arc<PluginState>, payload: Value) -> Result<Value, String> {
+pub async fn call(state: &Arc<ModuleState>, payload: Value) -> Result<Value, String> {
     let team_id = payload
         .get("team_id")
         .and_then(|v| v.as_str())
@@ -125,14 +125,10 @@ pub fn execute(store: &store::WorkspaceStore, arguments: &Value) -> Result<Strin
                 .iter()
                 .map(|dir| match dir.node() {
                     Some(node) => crate::wire::WorkspaceGitInfo {
-                        directory: format!(
-                            "node://{node}/{}",
-                            dir.path().trim_start_matches('/')
-                        ),
+                        directory: format!("node://{node}/{}", dir.path().trim_start_matches('/')),
                         is_repo: false,
                         error: Some(
-                            "跨机 git 状态需宿主联邦能力（本插件未接线：降级为不可采集）"
-                                .into(),
+                            "跨机 git 状态需宿主联邦能力（本模块未接线：降级为不可采集）".into(),
                         ),
                         ..Default::default()
                     },
@@ -295,8 +291,8 @@ mod tests {
     use super::*;
     use crate::Config;
 
-    fn state_with(dir: &std::path::Path) -> Arc<PluginState> {
-        let state = Arc::new(PluginState::new(Config {
+    fn state_with(dir: &std::path::Path) -> Arc<ModuleState> {
+        let state = Arc::new(ModuleState::new(Config {
             state_dir: dir.to_string_lossy().into_owned(),
         }));
         state.attach_self();
@@ -327,7 +323,10 @@ mod tests {
         )
         .await
         .expect("create");
-        assert!(created["content"].as_str().unwrap().contains("已创建工作区会话"));
+        assert!(created["content"]
+            .as_str()
+            .unwrap()
+            .contains("已创建工作区会话"));
 
         let listed = call(&state, json!({"team_id": "t", "operation": "list"}))
             .await

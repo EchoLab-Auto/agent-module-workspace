@@ -1,4 +1,4 @@
-//! Workspace 插件的 Panel UI 扩展入口。
+//! Workspace 模块的 Panel UI 扩展入口。
 //! 只有显式加入 PANEL_UI_EXTENSIONS 的构建才会加载本模块。
 
 import { watch } from 'vue';
@@ -9,7 +9,7 @@ import {
   sendCommand,
   sessionKey,
   state,
-  teamPluginEnabled,
+  teamModuleEnabled,
   teamToolAvailable,
   type PanelAppContext,
   type WorkspaceSessionInfo,
@@ -31,7 +31,7 @@ import {
 
 function available(teamId: string | null): boolean {
   const team = teamId === null ? currentTeam(state) : state.teams.find((item) => item.id === teamId) ?? null;
-  return !!team && teamPluginEnabled(team, 'echo-agent.workspace') && teamToolAvailable(team, 'workspace');
+  return !!team && teamModuleEnabled(team, 'echo-agent.workspace') && teamToolAvailable(team, 'workspace');
 }
 
 function workspaceCard(teamId: string | null): WorkspaceSessionInfo | null {
@@ -109,7 +109,7 @@ function setup(context: PanelAppContext): void {
         wasConnected = true;
       }
       const team = currentTeam(state);
-      if (!team || !teamPluginEnabled(team, 'echo-agent.workspace')) return;
+      if (!team || !teamModuleEnabled(team, 'echo-agent.workspace')) return;
       const key = `${team.core ?? ''}:${team.id}`;
       if (fetchKey === `${connectionEpoch}:${key}`) return;
       fetchKey = `${connectionEpoch}:${key}`;

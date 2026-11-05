@@ -1,4 +1,4 @@
-//! 工作区 git 状态卡契约（workspace 插件，2026-10 从「工作区会话管理」面板迁入边栏）。
+//! 工作区 git 状态卡契约（workspace 模块，2026-10 从「工作区会话管理」面板迁入边栏）。
 //!
 //! 本卡只做三件事：按绑定的工作区会话拉一次 `RequestWorkspaceGitStatus`、
 //! 把 `state.workspaceGitBySession` 的快照渲染成**每目录一行**（点行展开细节）、

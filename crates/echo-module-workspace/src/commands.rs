@@ -1,12 +1,12 @@
 //! 工作区命令域（`Contribution::Command` 实现）+ 工具调用入口。
 //!
 //! 这 7 条命令原本是宿主 `echo-agent` 里的 `impl Agent` 方法，后来搬进内置
-//! 插件，现在搬进**独立仓库**。搬动改变了三件事，都不改变对外语义：
+//! 模块，现在搬进**独立仓库**。搬动改变了三件事，都不改变对外语义：
 //!
 //! 1. **载荷解析**：不再重建宿主的 `BackendCommand`（那要依赖 Core crate，
 //!    形成包级循环），改成直接读 JSON 字段——字段名与线格式逐字一致。
-//! 2. **store**：插件自己拥有（per-persona，落盘在 `[plugin.config] state_dir`）。
-//! 3. **事件**：宿主侧发布（`emit`）变成插件发**插件事件**（见 `lib.rs` 的
+//! 2. **store**：模块自己拥有（per-persona，落盘在 `[module.config] state_dir`）。
+//! 3. **事件**：宿主侧发布（`emit`）变成模块发**模块事件**（见 `lib.rs` 的
 //!    协议说明），由宿主翻译成 `BackendEvent` 与会话子系统动作。
 //!
 //! `team_id` 语义仍是**必填**（去主智能体后没有默认人格），缺失即报错。
@@ -21,9 +21,9 @@ use crate::git::collect_dir_git;
 use crate::wire::{
     BrowseRoot, WorkspaceDirectory, WorkspaceFileEntry, WorkspaceGitInfo, WorkspaceSessionInfo,
 };
-use crate::PluginState;
+use crate::ModuleState;
 
-/// 本插件处理的命令（`Contribution::Command` 的 `name`）。
+/// 本模块处理的命令（`Contribution::Command` 的 `name`）。
 ///
 /// 前 7 条是**面板线协议命令**；后 2 条是**宿主内部命令**（面板不发它们）：
 /// 宿主原本直接调 store 的两个动作（会话级 API 覆盖的持久化、供应商改名传播）
@@ -44,13 +44,13 @@ pub const COMMANDS: [&str; 9] = [
 /// `workspace` 工具的调用入口名（宿主把工具调用转发到这里）。
 ///
 /// 为什么单独一个名字：工具不是线协议命令（面板不会发它），但**调用通道**
-/// 与命令域相同（`PluginHost` 的命令分发），所以复用一个显式命名，避免与
+/// 与命令域相同（`ModuleHost` 的命令分发），所以复用一个显式命名，避免与
 /// 7 条真命令混淆。
 pub const TOOL_CALL: &str = "WorkspaceToolCall";
 
-/// 处理一条命令；`None` = 不归本插件管（宿主继续找别人）。
+/// 处理一条命令；`None` = 不归本模块管（宿主继续找别人）。
 pub async fn handle(
-    state: &Arc<PluginState>,
+    state: &Arc<ModuleState>,
     name: &str,
     payload: Value,
 ) -> Option<Result<Value, String>> {
@@ -58,7 +58,7 @@ pub async fn handle(
     if name == TOOL_CALL {
         return Some(crate::tool::call(state, payload).await);
     }
-    // **先认领再解析**：契约上 `None` = 不归本插件管。与本域无关的载荷畸形
+    // **先认领再解析**：契约上 `None` = 不归本模块管。与本域无关的载荷畸形
     // 本应"不是我的事"，不能被认领成一个错误。
     if !COMMANDS.contains(&name) {
         return None;
@@ -91,7 +91,7 @@ pub async fn handle(
 // ── 命令实现 ─────────────────────────────────────────────────────────────
 
 /// 读快照并广播（`RequestWorkspaceSessions`）。
-fn request_sessions(state: &PluginState, team_id: Option<&str>) -> Result<Value, String> {
+fn request_sessions(state: &ModuleState, team_id: Option<&str>) -> Result<Value, String> {
     let store = store_or_err(state, team_id)?;
     let (sessions, active) = store.snapshot();
     let active_conversation = store.active_pair().map(|(_, conv)| conv.id);
@@ -108,7 +108,7 @@ fn request_sessions(state: &PluginState, team_id: Option<&str>) -> Result<Value,
 
 /// 新建/更新会话（`SaveWorkspaceSession`）。
 fn save_session(
-    state: &PluginState,
+    state: &ModuleState,
     team_id: Option<&str>,
     payload: &Value,
 ) -> Result<Value, String> {
@@ -126,7 +126,7 @@ fn save_session(
 
 /// 删除会话（`DeleteWorkspaceSession`）。
 fn delete_session(
-    state: &PluginState,
+    state: &ModuleState,
     team_id: Option<&str>,
     payload: &Value,
 ) -> Result<Value, String> {
@@ -144,7 +144,7 @@ fn delete_session(
 
 /// 激活/取消激活（`ActivateWorkspaceSession`）。
 fn activate_session(
-    state: &PluginState,
+    state: &ModuleState,
     team_id: Option<&str>,
     payload: &Value,
 ) -> Result<Value, String> {
@@ -159,7 +159,7 @@ fn activate_session(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     // 激活 = 进入项目对话：通道会话注册 + 列表广播由**宿主**在收到
-    // `workspace.changed` 事件时完成（插件不认识"会话通道"），这里只报回执。
+    // `workspace.changed` 事件时完成（模块不认识"会话通道"），这里只报回执。
     let message = match (&id, &conversation) {
         (Some(id), Some(conv)) => format!("已激活工作区会话：{id}（对话 {conv}）"),
         (Some(id), None) => format!("已激活工作区会话：{id}"),
@@ -172,11 +172,11 @@ fn activate_session(
 
 /// 宿主内部：把会话级 API 覆盖写进对应工作区对话（`profile` 空 = 清除）。
 ///
-/// 为什么是命令而不是让宿主直接写：store 在插件里（独立仓库），宿主只读镜像，
+/// 为什么是命令而不是让宿主直接写：store 在模块里（独立仓库），宿主只读镜像，
 /// 写入必须回到唯一写者。`session_id` 是**工作区通道** id
-/// （`local:workspace:<ws>[/<conv>]:<user>`），解析规则同插件侧。
+/// （`local:workspace:<ws>[/<conv>]:<user>`），解析规则同模块侧。
 fn set_conversation_api_profile(
-    state: &PluginState,
+    state: &ModuleState,
     team_id: Option<&str>,
     payload: &Value,
 ) -> Result<Value, String> {
@@ -203,7 +203,7 @@ fn set_conversation_api_profile(
 
 /// 宿主内部：供应商改名后传播到全部工作区对话的 `api_profile` 引用。
 fn rename_api_profile(
-    state: &PluginState,
+    state: &ModuleState,
     team_id: Option<&str>,
     payload: &Value,
 ) -> Result<Value, String> {
@@ -224,8 +224,8 @@ fn rename_api_profile(
 ///
 /// **列表/激活广播不在这里发**：store 的变更钩子会发 `workspace.changed`，
 /// 宿主据此走完「确保通道会话 + 恢复会话级 API + 发 SessionUpdated /
-/// WorkspaceSessions」。插件因此不需要知道宿主的会话子系统存在。
-fn mutate<F>(state: &PluginState, team_id: Option<&str>, f: F) -> Result<Value, String>
+/// WorkspaceSessions」。模块因此不需要知道宿主的会话子系统存在。
+fn mutate<F>(state: &ModuleState, team_id: Option<&str>, f: F) -> Result<Value, String>
 where
     F: FnOnce(&crate::store::WorkspaceStore) -> Result<String, String>,
 {
@@ -245,7 +245,7 @@ where
 }
 
 fn store_or_err(
-    state: &PluginState,
+    state: &ModuleState,
     team_id: Option<&str>,
 ) -> Result<Arc<crate::store::WorkspaceStore>, String> {
     let Some(team_id) = team_id else {
@@ -261,11 +261,11 @@ fn store_or_err(
 /// 某会话各目录的 git 快照（`RequestWorkspaceGitStatus`）。
 ///
 /// 远程目录（`node://`）在本仓**降级为占位条目**：Git 采集要在对端机器上跑，
-/// 而跨机查询是宿主的联邦能力（插件仓不依赖联邦实现）。降级是刻意的——
+/// 而跨机查询是宿主的联邦能力（模块仓不依赖联邦实现）。降级是刻意的——
 /// 单机部署根本不走这条路，多机部署的远程 git 由宿主另行补齐（见 README
 /// 的「能力边界」）。
 async fn git_status(
-    state: &PluginState,
+    state: &ModuleState,
     team_id: Option<&str>,
     payload: &Value,
 ) -> Result<Value, String> {
@@ -291,7 +291,7 @@ async fn git_status(
                 let qualified = format!("node://{node}/{}", dir.path().trim_start_matches('/'));
                 results[index] = Some(remote_git_placeholder(
                     &qualified,
-                    "跨机 git 状态需宿主联邦能力（本插件未接线：降级为不可采集）".into(),
+                    "跨机 git 状态需宿主联邦能力（本模块未接线：降级为不可采集）".into(),
                 ));
             }
             None => local.push((index, dir.path().to_string())),
@@ -333,7 +333,7 @@ fn remote_git_placeholder(qualified_directory: &str, message: String) -> Workspa
 
 /// 列某工作区目录下的文件（`RequestWorkspaceFiles`）。
 async fn files_list(
-    state: &PluginState,
+    state: &ModuleState,
     team_id: Option<&str>,
     payload: &Value,
 ) -> Result<Value, String> {
@@ -362,7 +362,7 @@ async fn files_list(
                 "session_id": workspace_id,
                 "path": path,
                 "entries": Vec::<WorkspaceFileEntry>::new(),
-                "error": "跨机文件浏览需宿主联邦能力（本插件未接线）",
+                "error": "跨机文件浏览需宿主联邦能力（本模块未接线）",
             }
         }));
         return Ok(Value::Null);
@@ -392,7 +392,7 @@ async fn files_list(
 }
 
 /// 目录选择器浏览（`RequestBrowseDirectories`）。
-async fn browse(state: &PluginState, payload: &Value) -> Result<Value, String> {
+async fn browse(state: &ModuleState, payload: &Value) -> Result<Value, String> {
     let path = payload
         .get("path")
         .and_then(|v| v.as_str())
@@ -406,14 +406,14 @@ async fn browse(state: &PluginState, payload: &Value) -> Result<Value, String> {
                     "path": raw,
                     "roots": Vec::<BrowseRoot>::new(),
                     "entries": Vec::<WorkspaceFileEntry>::new(),
-                    "error": "跨机目录浏览需宿主联邦能力（本插件未接线）",
+                    "error": "跨机目录浏览需宿主联邦能力（本模块未接线）",
                 }
             }));
             return Ok(Value::Null);
         }
     }
     // 浏览根 = **全部已加载 persona** 的工作区目录并集 ∪ HOME。
-    // 插件自己拥有所有 store，所以这件事不再需要宿主代劳。
+    // 模块自己拥有所有 store，所以这件事不再需要宿主代劳。
     let roots = browse_roots(state);
     match path {
         None => {
@@ -453,7 +453,7 @@ async fn browse(state: &PluginState, payload: &Value) -> Result<Value, String> {
 }
 
 /// 目录选择器的浏览根：HOME + 全部已加载 persona 的工作区目录（去重）。
-fn browse_roots(state: &PluginState) -> Vec<BrowseRoot> {
+fn browse_roots(state: &ModuleState) -> Vec<BrowseRoot> {
     let mut directories: Vec<WorkspaceDirectory> = Vec::new();
     let mut labels: HashMap<String, String> = HashMap::new();
     for store in state.all_stores() {
@@ -475,8 +475,8 @@ mod tests {
     use super::*;
     use crate::Config;
 
-    fn state_with(dir: &std::path::Path) -> Arc<PluginState> {
-        let state = Arc::new(PluginState::new(Config {
+    fn state_with(dir: &std::path::Path) -> Arc<ModuleState> {
+        let state = Arc::new(ModuleState::new(Config {
             state_dir: dir.to_string_lossy().into_owned(),
         }));
         state.attach_self();
@@ -489,10 +489,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("echo-ws-cmd-claim-{}", std::process::id()));
         let state = state_with(&dir);
         assert!(handle(&state, "RequestState", json!({})).await.is_none());
-        assert!(handle(&state, "SendMessage", json!({"team_id": "t"})).await.is_none());
-        assert!(handle(&state, "RequestWorkspaceSessions", json!({"team_id": "t"}))
+        assert!(handle(&state, "SendMessage", json!({"team_id": "t"}))
             .await
-            .is_some());
+            .is_none());
+        assert!(
+            handle(&state, "RequestWorkspaceSessions", json!({"team_id": "t"}))
+                .await
+                .is_some()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
