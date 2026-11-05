@@ -90,7 +90,7 @@ cargo test          # 32 个用例（store / git / files / prompt / wire / 命�
 cargo clippy --all-targets -- -D warnings
 ```
 
-框架类型（`echo-plugin` / `echo-context`）按 tag `v0.11.2` 取自
+框架类型（`echo-plugin` / `echo-context`）按 tag `v0.14.0` 取自
 `echo-fabric-arch`，与 Core 根 `Cargo.toml` 保持同一 tag——同一进程里不能出现两份
 `Box<dyn Plugin>`。本地联调框架改动时，把这两个依赖临时换成 `path` 即可。
 
