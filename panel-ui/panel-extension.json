@@ -1,0 +1,4 @@
+{
+  "id": "echo-agent.workspace",
+  "entry": "index.ts"
+}
