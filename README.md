@@ -1,6 +1,8 @@
-# echo-plugin-workspace
+# crate-workspace
 
 工作区会话插件（EchoAgent 插件，**独立仓库交付**）。
+
+仓库名 `crate-workspace`；Rust crate 名仍为 `echo-plugin-workspace`。
 
 从 `EchoAgentCore` 的内置插件 `source/plugin/echo-plugin-workspace` 迁出。业务逻辑
 （store / git 采集 / 文件浏览 / 提示词文案 / 命令域 / 工具）全部在本仓；Core 只保留
