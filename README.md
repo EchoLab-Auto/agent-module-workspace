@@ -20,7 +20,7 @@
 1. Core 的 `Cargo.toml` 加依赖：
 
    ```toml
-   echo-plugin-workspace = { git = "https://github.com/EchoLab-Auto/echo-plugin-workspace", branch = "main" }
+   echo-plugin-workspace = { git = "https://github.com/EchoLab-Auto/crate-workspace", branch = "main" }
    ```
 
 2. 内置插件目录登记（`builtin_plugins.rs`）：
