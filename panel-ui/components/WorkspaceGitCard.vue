@@ -35,7 +35,7 @@
 //! 的工作区。
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import NeumorphismButton from '@echolab-auto/ui-frame/components/NeumorphismButton';
-import { state } from '@echo-agent/panel';
+import { state, federatedPeerLabel } from '@echo-agent/panel';
 import { sendCommand } from '@echo-agent/panel';
 import { sessionKey } from '@echo-agent/panel';
 import type {
@@ -443,7 +443,7 @@ const repoCount = computed(() => dirs.value.filter((d) => d.is_repo).length);
           <span v-if="dir.ahead" class="wgc-sync" title="领先上游的提交数">↑{{ dir.ahead }}</span>
           <span v-if="dir.behind" class="wgc-sync" title="落后上游的提交数">↓{{ dir.behind }}</span>
           <span v-if="nodeOf(dir.directory)" class="wgc-node" :title="`跨机节点 ${nodeOf(dir.directory)}`">
-            {{ nodeOf(dir.directory) }}
+            {{ nodeOf(dir.directory) ? federatedPeerLabel(nodeOf(dir.directory) as string) : '' }}
           </span>
           <span
             v-if="dir.is_repo"

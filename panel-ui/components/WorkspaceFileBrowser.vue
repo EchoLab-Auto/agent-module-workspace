@@ -22,7 +22,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import NeumorphismButton from '@echolab-auto/ui-frame/components/NeumorphismButton';
 import NeumorphismSpinner from '@echolab-auto/ui-frame/components/NeumorphismSpinner';
-import { state } from '@echo-agent/panel';
+import { state, federatedPeerLabel } from '@echo-agent/panel';
 import { sendCommand } from '@echo-agent/panel';
 import { scopedKey } from '@echo-agent/panel';
 import type { WorkspaceSessionInfo } from '@echo-agent/panel';
@@ -355,7 +355,7 @@ function formatSize(size: number): string {
               <PanelIcon :name="row.isOpen ? 'folder-open' : 'folder'" size="sm" />
             </span>
             <span v-if="row.remoteNode" class="wfb-badge">
-              {{ row.remoteNode }}
+              {{ federatedPeerLabel(row.remoteNode) }}
               <PanelIcon name="link" size="xs" aria-label="远程节点" />
             </span>
             <span class="wfb-name">{{ row.label }}</span>

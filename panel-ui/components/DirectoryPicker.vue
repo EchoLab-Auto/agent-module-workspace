@@ -13,7 +13,7 @@
 //! 行交互：点击 = 选择该目录（立即回填）；行尾「›」= 进入浏览。
 
 import { computed, ref, watch } from 'vue';
-import { state } from '@echo-agent/panel';
+import { state, federatedPeerLabel } from '@echo-agent/panel';
 import { scopedKey } from '@echo-agent/panel';
 import { sendCommand } from '@echo-agent/panel';
 import NeumorphismButton from '@echolab-auto/ui-frame/components/NeumorphismButton';
@@ -38,13 +38,16 @@ const location = ref<string>(
 
 /** 在线联邦节点（位置可选项）。 */
 const peerNames = computed(() =>
-  (state.federation?.peers ?? []).filter((p) => p.link === 'Online').map((p) => p.name),
+  (state.federation?.peers ?? []).filter((p) => p.link === 'Online').map((p) => ({
+    name: p.name,
+    label: federatedPeerLabel(p.name, p.node_id, p.node_name),
+  })),
 );
 
 /** 位置下拉选项（库 Select options；'local' = 当前区域，其余 = 联邦节点）。 */
 const locationOptions = computed(() => [
   { label: '本机（当前区域）', value: 'local' },
-  ...peerNames.value.map((peer) => ({ label: `${peer}（联邦节点）`, value: peer })),
+  ...peerNames.value.map((peer) => ({ label: `${peer.label}（联邦节点）`, value: peer.name })),
 ]);
 
 /** 导航栈：[] = 根视图；每进入一层 push { label, path }。 */

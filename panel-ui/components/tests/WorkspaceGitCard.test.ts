@@ -56,6 +56,9 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
     state.connected = true;
     state.activeRegion = null;
     state.workspaceGitBySession = {};
+    state.upstreams = [];
+    state.federations = {};
+    state.federation = null;
   });
 
   it('挂载即拉取：命令带 team_id 与 session_id', async () => {
@@ -238,6 +241,24 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
     // 单目录 → 展开：父目录剥掉 node://host 前缀，只留本机路径
     expect(wrapper.text()).toContain('/home/evence');
     expect(wrapper.text()).not.toContain('node://A100-40g/home/evence');
+    wrapper.unmount();
+  });
+
+  it('跨机目录徽标按 node_id 显示人工接入点名', async () => {
+    const node = 'node-01m436f84jtxye5ga61dmnz94p';
+    state.upstreams = [{ name: 'ai_station', source: 'manual' } as never];
+    state.federations.ai_station = { enabled: true, node_id: node, listen: '', peers: [] };
+    state.federation = { enabled: true, node_id: 'local', listen: '', peers: [{
+      name: 'node-01m436f8', node_id: node, url: '', token_set: true, allow_tools: ['*'],
+      allow_subagent: true, require_confirm: [], allow_queries: ['*'], link: 'Online',
+    }] };
+    state.workspaceGitBySession = {
+      [sessionKey(null, 'core')]: [info({ directory: 'node://node-01m436f8/root/repo' })],
+    };
+    const wrapper = mount(WorkspaceGitCard, { props: { teamId: 'EchoCode', session: workspace() } });
+    await nextTick();
+    expect(wrapper.find('.wgc-node').text()).toBe('ai_station');
+    expect(wrapper.find('.wgc-row').attributes('title')).toContain('node://node-01m436f8/root/repo');
     wrapper.unmount();
   });
 

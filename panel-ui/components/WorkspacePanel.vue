@@ -567,12 +567,15 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
+  width: 100%;
 }
 .ws-pane--main {
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+  min-height: 0;
 }
 
 .ws-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -634,7 +637,9 @@ watch(
 .ws-textarea { font-family: var(--nm-font-mono, monospace); min-height: 64px; }
 .ws-form__actions { display: flex; gap: 6px; justify-content: flex-end; }
 
-.ws-list { display: flex; flex-direction: column; gap: 8px; }
+.ws-list {
+  min-width: 0;
+  padding: 2px; display: flex; flex-direction: column; gap: 8px; }
 .ws-card {
   display: flex;
   flex-direction: column;
