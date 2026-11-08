@@ -7,8 +7,9 @@
 //! 与 Core 版本的区别只有一处：不再依赖 `echo-protocol` 的类型，改用
 //! [`crate::wire`] 的线镜像（见该模块文档：包级循环依赖所致）。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use crate::wire::{WorkspaceConversationInfo, WorkspaceSessionInfo};
 
@@ -44,8 +45,17 @@ pub type ConversationDeleteHook =
 pub struct WorkspaceStore {
     doc: RwLock<WorkspaceDocument>,
     persist: Option<PathBuf>,
-    on_change: RwLock<Option<ChangeHook>>,
-    on_conversation_deleted: RwLock<Option<ConversationDeleteHook>>,
+    /// 变更钩子**按注册方分槽**（key = 注册方自报的身份，见
+    /// [`Self::upsert_on_change`]）。
+    ///
+    /// 为什么不是单个 `Option`：同一个文档可能被**多个模块实例**持有
+    /// （每个 persona 一个模块实例，而 `store(team_id)` 对任意 team 都合法
+    /// ——`all_stores` / 跨人格目录选择器就是跨 team 访问）。共享同一个
+    /// `Arc<WorkspaceStore>` 之后，若钩子仍是单槽，后注册的实例会把前面的
+    /// 顶掉，被顶掉那层就再也不会广播 `workspace.changed`（面板停在旧快照，
+    /// 正是 2026-11 "会话 API 刷新后不保留"的现场）。分槽后各注册方都收得到。
+    on_change: RwLock<Vec<(u64, ChangeHook)>>,
+    on_conversation_deleted: RwLock<Vec<(u64, ConversationDeleteHook)>>,
 }
 
 impl std::fmt::Debug for WorkspaceStore {
@@ -64,10 +74,45 @@ impl Default for WorkspaceStore {
         Self {
             doc: RwLock::new(WorkspaceDocument::default()),
             persist: None,
-            on_change: RwLock::new(None),
-            on_conversation_deleted: RwLock::new(None),
+            on_change: RwLock::new(Vec::new()),
+            on_conversation_deleted: RwLock::new(Vec::new()),
         }
     }
+}
+
+/// 进程级 store 注册表：**文档路径 → 唯一内存副本**（弱引用）。
+///
+/// 为什么在 `store` 这一层做，而不是在模块实例里做：workspace 文档不是
+/// 某个模块实例的私有物——`echo-workspaces-<team>.json` 属于那个 persona，
+/// 而任何一层（任意人格的模块实例）都可能经由 `store(team_id)` 访问它
+/// （跨人格目录选择器、`all_stores`、宿主 `dispatch_raw`）。缓存若挂在实例上，
+/// 同一文件就有多份内存视图：
+///
+/// - 写命令改 A 副本 + 落盘；
+/// - 读命令返回 B 副本的旧值。
+///
+/// 2026-11 用户报障就是这个：磁盘里 `api_profile` 已经是新值，广播里还是旧的
+/// ——"改完刷新又回去了"。
+///
+/// 用 `Weak` 而不是 `Arc`：没有访问者时允许回收，回收后下次 `shared()` 重新
+/// 读盘（磁盘是权威），不会留下永久驻留的缓存。
+static STORES: OnceLock<Mutex<HashMap<PathBuf, Weak<WorkspaceStore>>>> = OnceLock::new();
+
+/// 取某份文档的**进程内唯一** store（不存在或已被回收则读盘新建）。
+pub fn shared(path: PathBuf) -> Arc<WorkspaceStore> {
+    let registry = STORES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut map) = registry.lock() {
+        // 顺手清理已回收的条目，避免长跑进程里 key 无限增长（人格增删、测试）。
+        map.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(existing) = map.get(&path).and_then(Weak::upgrade) {
+            return existing;
+        }
+        let store = Arc::new(WorkspaceStore::load(Some(path.clone())));
+        map.insert(path, Arc::downgrade(&store));
+        return store;
+    }
+    // 锁中毒（持有者 panic）：退回"每层一份"的旧行为，绝不 panic 在热路径上。
+    Arc::new(WorkspaceStore::load(Some(path)))
 }
 
 impl WorkspaceStore {
@@ -82,31 +127,57 @@ impl WorkspaceStore {
         Self {
             doc: RwLock::new(doc),
             persist,
-            on_change: RwLock::new(None),
-            on_conversation_deleted: RwLock::new(None),
+            on_change: RwLock::new(Vec::new()),
+            on_conversation_deleted: RwLock::new(Vec::new()),
         }
     }
 
-    /// 注册变更钩子（装配期注入一次；重复调用替换旧钩子）。
+    /// 注册变更钩子（装配期注入一次；重复调用替换**同一个 key** 的旧钩子）。
     pub fn set_on_change(&self, hook: ChangeHook) {
-        if let Ok(mut slot) = self.on_change.write() {
-            *slot = Some(hook);
+        self.upsert_on_change(0, hook);
+    }
+
+    /// 按注册方身份注册/替换变更钩子（`key` 由注册方自己保证唯一）。
+    ///
+    /// 共享 store（同一文档被多个模块实例持有）时每个实例用自己的 key 注册，
+    /// 彼此不会覆盖。同一 key 反复调用是幂等的——`ModuleState::store` 每次
+    /// 命中缓存都会重注册，若不幂等，槽位会随调用次数增长。
+    pub fn upsert_on_change(&self, key: u64, hook: ChangeHook) {
+        if let Ok(mut slots) = self.on_change.write() {
+            if let Some(slot) = slots.iter_mut().find(|(k, _)| *k == key) {
+                slot.1 = hook;
+            } else {
+                slots.push((key, hook));
+            }
         }
     }
 
     /// 注册对话删除钩子（装配期注入一次；用于清空被删对话的通道历史）。
     /// 钩子在 doc 锁释放后触发。
     pub fn set_on_conversation_deleted(&self, hook: ConversationDeleteHook) {
-        if let Ok(mut slot) = self.on_conversation_deleted.write() {
-            *slot = Some(hook);
+        self.upsert_on_conversation_deleted(0, hook);
+    }
+
+    /// 按注册方身份注册/替换对话删除钩子（语义同 [`Self::upsert_on_change`]）。
+    pub fn upsert_on_conversation_deleted(&self, key: u64, hook: ConversationDeleteHook) {
+        if let Ok(mut slots) = self.on_conversation_deleted.write() {
+            if let Some(slot) = slots.iter_mut().find(|(k, _)| *k == key) {
+                slot.1 = hook;
+            } else {
+                slots.push((key, hook));
+            }
         }
     }
 
     /// 触发变更通知。必须在释放 `doc` 写锁**之后**调用（钩子会回读 store），
     /// 且钩子只做广播、不得再次修改 store（避免递归）。
     fn notify_change(&self) {
-        let hook = self.on_change.read().ok().and_then(|slot| slot.clone());
-        if let Some(hook) = hook {
+        let hooks: Vec<ChangeHook> = self
+            .on_change
+            .read()
+            .map(|slots| slots.iter().map(|(_, hook)| hook.clone()).collect())
+            .unwrap_or_default();
+        for hook in hooks {
             hook();
         }
     }
@@ -402,12 +473,12 @@ impl WorkspaceStore {
             }
         };
         if let Some(ref conv) = removed {
-            let hook = self
+            let hooks: Vec<ConversationDeleteHook> = self
                 .on_conversation_deleted
                 .read()
-                .ok()
-                .and_then(|slot| slot.clone());
-            if let Some(hook) = hook {
+                .map(|slots| slots.iter().map(|(_, hook)| hook.clone()).collect())
+                .unwrap_or_default();
+            for hook in hooks {
                 hook(ws_id, conv);
             }
         }
@@ -775,6 +846,112 @@ mod tests {
     }
 
     /// 变更钩子只在真实变更时触发，且可在钩子里回读 store（不死锁）。
+    /// 2026-11 用户报障回归：同一份文档被**两个模块实例**持有（每个 persona
+    /// 一个 workspace 模块实例，而 `store(team_id)` 对任意 team 都合法）。
+    ///
+    /// 修前：缓存按实例分 → 写命令改 A 的内存 + 落盘，读命令返回 B 的旧内存
+    /// （表观症状："设置生效，刷新后回到旧值"，而磁盘其实是新值）。
+    #[test]
+    fn shared_returns_one_copy_per_document_path() {
+        let dir = std::env::temp_dir().join(format!("echo-ws-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("echo-workspaces-team.json");
+
+        let a = shared(path.clone());
+        let b = shared(path.clone());
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "同一文档路径必须映射到同一个 store 实例（否则读写走不同内存副本）"
+        );
+
+        // 写经 a、读经 b：必须看到同一份内存（不是磁盘回读，是同一个实例）
+        a.upsert(crate::wire::WorkspaceSessionInfo {
+            id: "ws".into(),
+            name: "WS".into(),
+            description: String::new(),
+            directories: Vec::new(),
+            conversations: Vec::new(),
+            last_conversation: None,
+        })
+        .expect("upsert");
+        let (sessions, _) = b.snapshot();
+        assert_eq!(sessions.len(), 1, "另一份副本必须立刻看到写入");
+        assert_eq!(sessions[0].id, "ws");
+
+        // 不同路径 → 不同实例（不能串味）
+        let other = shared(dir.join("echo-workspaces-other.json"));
+        assert!(!Arc::ptr_eq(&a, &other));
+
+        drop(a);
+        drop(b);
+        drop(other);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 共享 store 上的钩子必须**按注册方分槽**：后注册者不能顶掉前者
+    /// （被顶掉那层再也收不到 `workspace.changed`，面板停在旧快照）。
+    #[test]
+    fn change_hooks_are_per_registrant() {
+        let store = WorkspaceStore::default();
+        let first = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let counter = first.clone();
+            store.upsert_on_change(
+                1,
+                std::sync::Arc::new(move || {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+            );
+        }
+        {
+            let counter = second.clone();
+            store.upsert_on_change(
+                2,
+                std::sync::Arc::new(move || {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+            );
+        }
+        store
+            .upsert(crate::wire::WorkspaceSessionInfo {
+                id: "ws".into(),
+                name: "WS".into(),
+                description: String::new(),
+                directories: Vec::new(),
+                conversations: Vec::new(),
+                last_conversation: None,
+            })
+            .expect("upsert");
+        assert_eq!(first.load(std::sync::atomic::Ordering::SeqCst), 1, "先注册者必须仍被通知");
+        assert_eq!(second.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // 同 key 重注册是幂等的（`ModuleState::store` 每次命中缓存都会重注册）
+        let before = first.load(std::sync::atomic::Ordering::SeqCst);
+        {
+            let counter = first.clone();
+            store.upsert_on_change(
+                1,
+                std::sync::Arc::new(move || {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+            );
+        }
+        store
+            .upsert(crate::wire::WorkspaceSessionInfo {
+                id: "ws2".into(),
+                name: "WS2".into(),
+                description: String::new(),
+                directories: Vec::new(),
+                conversations: Vec::new(),
+                last_conversation: None,
+            })
+            .expect("upsert");
+        // 只多触发一次（槽位没被复制成两份）
+        assert_eq!(first.load(std::sync::atomic::Ordering::SeqCst), before + 1);
+    }
+
     #[test]
     fn change_hook_fires_on_mutations_only() {
         let (store, path) = temp_store("hook");

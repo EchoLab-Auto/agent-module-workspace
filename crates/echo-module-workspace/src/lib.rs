@@ -144,7 +144,18 @@ pub struct ModuleState {
     /// 自引用（弱）：store 的变更钩子需要回调本状态，而本状态持有 store。
     /// 用 `Weak` 断开这条环，钩子在模块被卸载后自然失效。
     self_ref: RwLock<std::sync::Weak<ModuleState>>,
+    /// 本实例在**共享 store** 上的钩子槽位 id（见 `store::WorkspaceStore::
+    /// upsert_on_change`）。
+    ///
+    /// 为什么需要：同一份 workspace 文档会被多个模块实例持有（每个 persona
+    /// 一个模块实例，而 `store(team_id)` 对任意 team 都合法）。store 进程级
+    /// 共享后，钩子必须按实例分槽——单槽会让后注册者顶掉前者，被顶掉那层
+    /// 就再也收不到 `workspace.changed`。
+    hook_id: u64,
 }
+
+/// 钩子槽位 id 发号器（进程级单调）。
+static NEXT_HOOK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl std::fmt::Debug for ModuleState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -173,6 +184,7 @@ impl ModuleState {
             stores: RwLock::new(HashMap::new()),
             emit: RwLock::new(None),
             self_ref: RwLock::new(std::sync::Weak::new()),
+            hook_id: NEXT_HOOK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -230,6 +242,20 @@ impl ModuleState {
     }
 
     /// 某个 persona 的 store（惰性创建：首次访问时读盘 + 接变更钩子）。
+    ///
+    /// **进程级共享**（2026-11）：同一份 workspace 文档在进程内只对应一个
+    /// `Arc<WorkspaceStore>`，无论它被哪个 persona 的模块实例、经由哪个
+    /// `team_id` 访问到。
+    ///
+    /// 为什么必须共享：每个 persona 有自己的模块实例（`PersonaScope` 用目录
+    /// 工厂重建一批），而 `store(team_id)` 的参数来自命令载荷、对任意 team 都
+    /// 合法（跨人格目录选择器 / `all_stores` 就是这么用的）。若缓存按实例分，
+    /// 同一文件会同时存在于多份内存副本里：
+    /// - 写命令（`SetSessionApi` → `WorkspaceSetConversationApiProfile`）命中
+    ///   一份，改内存 + 落盘；
+    /// - 读命令（`RequestWorkspaceSessions`）命中另一份，返回**旧值**。
+    /// 表现就是"设置生效了、落盘也写了，但界面刷新后回到旧值"（2026-11
+    /// 用户报障的确切现场：磁盘 `api_profile=deepseek`，广播里是 `kimi`）。
     pub fn store(&self, team_id: &str) -> Arc<store::WorkspaceStore> {
         if let Some(existing) = self
             .stores
@@ -240,9 +266,7 @@ impl ModuleState {
             return existing.clone();
         }
         let config = self.config();
-        let store = Arc::new(store::WorkspaceStore::load(Some(
-            config.document_path(team_id),
-        )));
+        let store = store::shared(config.document_path(team_id));
         // 「store 变更 → 广播」的唯一入口（面板命令与模型 `use` 工具共用）。
         // 钩子持 `Weak`：见 [`ModuleState::attach_self`] 的说明。
         {
@@ -252,11 +276,14 @@ impl ModuleState {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             let team_id = team_id.to_string();
-            store.set_on_change(Arc::new(move || {
-                if let Some(state) = weak.upgrade() {
-                    state.on_store_changed(&team_id);
-                }
-            }));
+            store.upsert_on_change(
+                self.hook_id,
+                Arc::new(move || {
+                    if let Some(state) = weak.upgrade() {
+                        state.on_store_changed(&team_id);
+                    }
+                }),
+            );
         }
         {
             let weak = self
@@ -265,7 +292,7 @@ impl ModuleState {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             let team_id = team_id.to_string();
-            store.set_on_conversation_deleted(Arc::new(move |workspace_id, conversation| {
+            store.upsert_on_conversation_deleted(self.hook_id, Arc::new(move |workspace_id, conversation| {
                 if let Some(state) = weak.upgrade() {
                     state.emit_event(
                         events::CONVERSATION_DELETED,
