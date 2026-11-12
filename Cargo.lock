@@ -3,6 +3,18 @@
 version = 4
 
 [[package]]
+name = "agent-module-workspace"
+version = "0.1.0"
+dependencies = [
+ "echo-context",
+ "echo-module",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -60,18 +72,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "toml",
- "tracing",
-]
-
-[[package]]
-name = "echo-module-workspace"
-version = "0.1.0"
-dependencies = [
- "echo-context",
- "echo-module",
- "serde",
- "serde_json",
- "tokio",
  "tracing",
 ]
 

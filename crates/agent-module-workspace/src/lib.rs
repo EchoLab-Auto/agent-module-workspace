@@ -1,4 +1,4 @@
-//! # echo-module-workspace — 工作区会话模块（独立交付）
+//! # agent-module-workspace — 工作区会话模块（独立交付）
 //!
 //! 工作区会话 = 用户从 Panel 管理的一组工作目录（创建 / 改名 / 删除 / 激活），
 //! 可逐目录查看 `git status`、浏览文件、选择目录。激活会话的目录会注入系统
@@ -56,7 +56,7 @@ pub mod wire;
 // ── 迁移兼容 re-export ────────────────────────────────────────────────────
 //
 // 宿主（EchoAgentCore）此前用 `echo_agent::workspace::X` 引用这些条目
-// （`pub use echo_module_workspace as workspace`）。模块迁仓后这些路径由本仓
+// （`pub use agent_module_workspace as workspace`）。模块迁仓后这些路径由本仓
 // 继续提供，宿主侧不必改调用点——只有真正属于宿主的接线（会话通道、广播）
 // 需要动。
 

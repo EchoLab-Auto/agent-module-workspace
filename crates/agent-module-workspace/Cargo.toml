@@ -1,5 +1,5 @@
 [package]
-name = "echo-module-workspace"
+name = "agent-module-workspace"
 description = "工作区会话模块：多会话 / 多目录管理 + git 状态 + workspace 工具（独立交付）"
 version.workspace = true
 edition.workspace = true

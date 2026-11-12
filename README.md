@@ -2,9 +2,9 @@
 
 工作区会话模块（EchoAgent 模块，**独立仓库交付**）。
 
-仓库名 `crate-workspace`；Rust crate 名仍为 `echo-module-workspace`。
+仓库名 `crate-workspace`；Rust crate 名仍为 `agent-module-workspace`。
 
-从 `EchoAgentCore` 的内置模块 `source/module/echo-module-workspace` 迁出。业务逻辑
+从 `EchoAgentCore` 的内置模块 `source/module/agent-module-workspace` 迁出。业务逻辑
 （store / git 采集 / 文件浏览 / 提示词文案 / 命令域 / 工具）全部在本仓；Core 只保留
 通用接线（见「宿主侧接线」）。
 
@@ -22,13 +22,13 @@
 1. Core 的 `Cargo.toml` 加依赖：
 
    ```toml
-   echo-module-workspace = { git = "https://github.com/EchoLab-Auto/crate-workspace", branch = "main" }
+   agent-module-workspace = { git = "https://github.com/EchoLab-Auto/crate-workspace", branch = "main" }
    ```
 
 2. 内置模块目录登记（`builtin_modules.rs`）：
 
    ```rust
-   push_module(&mut catalog, echo_module_workspace::module(version))?;
+   push_module(&mut catalog, agent_module_workspace::module(version))?;
    ```
 
 3. `modules.toml` 可给它配置落盘目录（省略 = `$XDG_CONFIG_HOME/echo-agent-core`）：
@@ -52,7 +52,7 @@
    | `workspace.changed` | `{team_id, active, active_conversation, sessions}` | active 存在时确保工作区会话通道已注册（会话名 = 工作区名 + 对话名）、推 `SessionUpdated`、广播 `WorkspaceSessions` |
    | `workspace.conversation_deleted` | `{team_id, workspace_id, conversation}` | 清空该对话的通道历史（事件日志 / 投影 / 时间线） |
 
-5. **注册工具**：用 `echo_module_workspace::tool::{TOOL_NAME, description(),
+5. **注册工具**：用 `agent_module_workspace::tool::{TOOL_NAME, description(),
    parameters()}` 建一个转发型 `Tool`，`execute` 时把参数 + `team_id` 交给
 
    ```rust
