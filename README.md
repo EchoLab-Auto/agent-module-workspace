@@ -71,13 +71,20 @@
 | 会话 / 对话 / 激活 / 持久化 | 一致（同一份 `echo-workspaces-{team}.json`，旧数据可直接读） |
 | git 快照 / 文件浏览 / 目录选择器 | 一致（本机目录） |
 | 提示词块 / `workspace` 工具 | 一致 |
-| **跨机（`node://`）git 状态** | **降级**：返回「不可采集」占位 + 原因 |
-| **跨机（`node://`）文件浏览 / 目录选择器** | **降级**：空结果 + 原因 |
+| 跨机（`node://`）git 状态 / 文件浏览 / 目录选择器 | 一致（宿主注入查询接缝时）；未注入则降级 |
 
-降级原因：跨机查询用的是宿主的联邦能力（`echo-defs::workspace::RemoteWorkspaceQuery`
-→ 联邦 `Invoke`），而本仓**不依赖 Core 的任何 crate**（Core 以 git 依赖引入本仓，
-反向依赖就是包级循环，Cargo 拒绝）。单机部署完全不受影响；多机部署要在宿主侧补一个
-「远程目录代理」（可做成宿主订阅的另一个模块事件，属后续工作）。
+跨机查询的接缝 `RemoteWorkspaceQuery` **声明在本模块**（`src/remote.rs`），实现方是
+组合根：它把联邦的 `RemoteQuerier` 适配成三个语义方法，按服务键
+`echo-agent.host.workspace.remote_query` 注册，模块在 `mount` 时取用。
+
+> 历史（2026-11）：trait 原先住在 Core 的 `echo-defs`，于是本仓**无法命名它**
+> （本仓不依赖 Core 的任何 crate，反向依赖就是包级循环，Cargo 拒绝），三个远程
+> 能力只能全部降级成占位。可对端执行端与发送端早已齐全——缺的只是归属。语义
+> 属于消费方，契约因此回到本模块。
+
+**未注入 = 降级**：宿主没注册服务键（单机部署 / 联邦关闭）时，远程目录继续显示
+「不可采集」占位，本机功能零影响。查询失败同样只降级**那一个目录**（带对端给的
+原因），不会让同会话的本机目录也看不到。
 
 ## Panel UI
 
@@ -86,7 +93,7 @@
 ## 开发
 
 ```bash
-cargo test          # 32 个用例（store / git / files / prompt / wire / 命令域 / 工具）
+cargo test          # 42 个用例（store / git / files / prompt / remote / wire / 命令域 / 工具）
 cargo clippy --all-targets -- -D warnings
 ```
 

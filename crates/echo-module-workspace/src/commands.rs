@@ -260,10 +260,10 @@ fn store_or_err(
 
 /// 某会话各目录的 git 快照（`RequestWorkspaceGitStatus`）。
 ///
-/// 远程目录（`node://`）在本仓**降级为占位条目**：Git 采集要在对端机器上跑，
-/// 而跨机查询是宿主的联邦能力（模块仓不依赖联邦实现）。降级是刻意的——
-/// 单机部署根本不走这条路，多机部署的远程 git 由宿主另行补齐（见 README
-/// 的「能力边界」）。
+/// 远程目录（`node://`）走宿主注入的 [`crate::remote::RemoteWorkspaceQuery`]
+/// 接缝：git 采集必须在**对端**机器上跑，网络那一半属宿主的联邦子系统。
+/// 宿主没注入（单机部署 / 联邦关闭）或查询失败时，该目录降级为占位条目，
+/// 同会话的本机目录照常返回——见 [`remote_git_status`]。
 async fn git_status(
     state: &ModuleState,
     team_id: Option<&str>,
@@ -285,25 +285,32 @@ async fn git_status(
     let directories = session.directories.clone();
     let mut results: Vec<Option<WorkspaceGitInfo>> = vec![None; directories.len()];
     let mut local: Vec<(usize, String)> = Vec::new();
+    let mut remote: Vec<(usize, String, String)> = Vec::new();
     for (index, dir) in directories.iter().enumerate() {
         match dir.node() {
-            Some(node) => {
-                let qualified = format!("node://{node}/{}", dir.path().trim_start_matches('/'));
-                results[index] = Some(remote_git_placeholder(
-                    &qualified,
-                    "跨机 git 状态需宿主联邦能力（本模块未接线：降级为不可采集）".into(),
-                ));
-            }
+            Some(peer) => remote.push((index, peer.to_string(), dir.path().to_string())),
             None => local.push((index, dir.path().to_string())),
         }
     }
-    if !local.is_empty() {
+    // 本机采集先发车（`spawn_blocking`：多次 git 子进程，几十毫秒到几秒），
+    // 再 await 远程查询——两段并行，混合目录不必串行等待。
+    let local_handle = if local.is_empty() {
+        None
+    } else {
         let paths: Vec<String> = local.iter().map(|(_, p)| p.clone()).collect();
-        let collected = tokio::task::spawn_blocking(move || {
+        Some(tokio::task::spawn_blocking(move || {
             paths.iter().map(|p| collect_dir_git(p)).collect::<Vec<_>>()
-        })
-        .await
-        .map_err(|e| format!("git 采集失败: {e}"))?;
+        }))
+    };
+    // 远程目录逐个 await：典型场景只有 1-2 个；并发要引 `futures` 依赖，
+    // 收益不抵多一个 crate。对端离线时每个最多等联邦侧超时（30s）。
+    for (index, peer, path) in remote {
+        results[index] = Some(remote_git_status(state, &peer, &path).await);
+    }
+    if let Some(handle) = local_handle {
+        let collected = handle
+            .await
+            .map_err(|e| format!("git 采集失败: {e}"))?;
         for ((index, _), info) in local.into_iter().zip(collected) {
             results[index] = Some(info);
         }
@@ -317,6 +324,48 @@ async fn git_status(
         }
     }));
     Ok(Value::Null)
+}
+
+/// 远程目录降级原因（宿主未注入 [`crate::remote::REMOTE_QUERY`] 时）。
+const NOT_WIRED_QUERY: &str = "跨机查询未接线（宿主未注入联邦查询能力：单机部署属正常）";
+
+/// 单个远程目录的 git 快照。
+///
+/// 三级降级，逐级都只影响**这一个目录**——一个有问题的对端不该让同会话的
+/// 本机目录也看不到：
+///
+/// 1. 接缝未注入 → 占位（单机部署的常态，与改造前文案一致）；
+/// 2. 查询失败（对端离线 / 未授权 / 沙箱拒绝 / 超时）→ 占位 + 对端给的原因；
+/// 3. 载荷解析失败（对端版本不匹配）→ 占位 + 解析错误。
+async fn remote_git_status(state: &ModuleState, peer: &str, path: &str) -> WorkspaceGitInfo {
+    let qualified = crate::remote::join_node_path(peer, path);
+    let Some(query) = state.remote_query() else {
+        return remote_git_placeholder(&qualified, NOT_WIRED_QUERY.to_string());
+    };
+    match query.git_status(peer.to_string(), path.to_string()).await {
+        Ok(payload) => decode_remote_git(&payload, &qualified),
+        Err(message) => remote_git_placeholder(&qualified, message),
+    }
+}
+
+/// 解析对端回推的 `{"git": WorkspaceGitInfo}`，并把目录名换成本机视角的
+/// 规范写法。
+///
+/// `directory` 必须改写：对端回的是**它本机**的绝对路径（`/srv/repo`），
+/// 原样透传会让面板把它当本机目录（`panel-ui/workspace.ts` 的 `directoryNode`
+/// 只认 `node://` 前缀），git 卡片于是归错组。
+fn decode_remote_git(payload: &Value, qualified: &str) -> WorkspaceGitInfo {
+    let raw = payload.get("git").cloned().unwrap_or(Value::Null);
+    match serde_json::from_value::<WorkspaceGitInfo>(raw) {
+        Ok(mut info) => {
+            info.directory = qualified.to_string();
+            info
+        }
+        Err(error) => remote_git_placeholder(
+            qualified,
+            format!("对端返回的 git 载荷无法解析（对端版本可能较旧）: {error}"),
+        ),
+    }
 }
 
 /// 远程 git 状态占位（对端不可采集）：保留 `node://` 标注与原因。
@@ -353,16 +402,23 @@ async fn files_list(
         state.emit_error(team_id, message.clone());
         return Err(message);
     };
-    // 跨机目录：本仓不接联邦 → 明确的空结果 + 原因（面板显示为错误条，
-    // 而不是永不返回的转圈）。
+    // 跨机目录：走宿主注入的联邦查询接缝；未接线 / 失败都给明确的空结果
+    // + 原因（面板显示为错误条，而不是永不返回的转圈）。
     if path.starts_with("node://") {
+        let (entries, error) = match crate::remote::split_node_path(&path) {
+            None => (
+                Vec::new(),
+                Some("远程路径格式不合法（应为 node://<节点>/<绝对路径>）".to_string()),
+            ),
+            Some((peer, remote_path)) => remote_files(state, &peer, &remote_path).await,
+        };
         state.emit_backend(json!({
             "WorkspaceFiles": {
                 "team_id": team_id,
                 "session_id": workspace_id,
                 "path": path,
-                "entries": Vec::<WorkspaceFileEntry>::new(),
-                "error": "跨机文件浏览需宿主联邦能力（本模块未接线）",
+                "entries": entries,
+                "error": error,
             }
         }));
         return Ok(Value::Null);
@@ -398,15 +454,23 @@ async fn browse(state: &ModuleState, payload: &Value) -> Result<Value, String> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    // 远程路径：本仓不接联邦 → 空根 + 原因。
+    // 远程路径：走联邦查询接缝；未接线 / 失败都给空结果 + 原因。
     if let Some(raw) = path.as_deref() {
         if raw.starts_with("node://") {
+            let (roots, entries, error) = match crate::remote::split_node_path(raw) {
+                None => (
+                    Vec::new(),
+                    Vec::new(),
+                    Some("远程路径格式不合法（应为 node://<节点>/<绝对路径>）".to_string()),
+                ),
+                Some((peer, remote_path)) => remote_browse(state, &peer, &remote_path).await,
+            };
             state.emit_backend(json!({
                 "BrowseDirectories": {
                     "path": raw,
-                    "roots": Vec::<BrowseRoot>::new(),
-                    "entries": Vec::<WorkspaceFileEntry>::new(),
-                    "error": "跨机目录浏览需宿主联邦能力（本模块未接线）",
+                    "roots": roots,
+                    "entries": entries,
+                    "error": error,
                 }
             }));
             return Ok(Value::Null);
@@ -450,6 +514,83 @@ async fn browse(state: &ModuleState, payload: &Value) -> Result<Value, String> {
         }
     }
     Ok(Value::Null)
+}
+
+/// 远程目录的文件清单（`(entries, error)`，两者互斥地表达成功与失败）。
+///
+/// 错误**不外抛**：`WorkspaceFiles` 事件里的 `error` 字段是面板错误条的
+/// 唯一来源，抛出去会让前端一直转圈。
+async fn remote_files(
+    state: &ModuleState,
+    peer: &str,
+    path: &str,
+) -> (Vec<WorkspaceFileEntry>, Option<String>) {
+    let Some(query) = state.remote_query() else {
+        return (Vec::new(), Some(NOT_WIRED_QUERY.to_string()));
+    };
+    match query.list_files(peer.to_string(), path.to_string()).await {
+        Ok(payload) => {
+            let raw = payload.get("entries").cloned().unwrap_or(Value::Null);
+            match serde_json::from_value::<Vec<WorkspaceFileEntry>>(raw) {
+                Ok(entries) => (entries, None),
+                Err(error) => (
+                    Vec::new(),
+                    Some(format!(
+                        "对端返回的文件清单无法解析（对端版本可能较旧）: {error}"
+                    )),
+                ),
+            }
+        }
+        Err(message) => (Vec::new(), Some(message)),
+    }
+}
+
+/// 远程目录浏览（`(roots, entries, error)`）。
+///
+/// 根列表请求由模块侧先解析：`node://<peer>/` 剥完前缀是 `"/"`，对端把
+/// `"/"` 与空串都当"列根"，所以这里不做额外归一化——两端口径一致，
+/// 多一层本地特判只会在对端换实现时对不上。
+async fn remote_browse(
+    state: &ModuleState,
+    peer: &str,
+    path: &str,
+) -> (
+    Vec<BrowseRoot>,
+    Vec<WorkspaceFileEntry>,
+    Option<String>,
+) {
+    let Some(query) = state.remote_query() else {
+        return (Vec::new(), Vec::new(), Some(NOT_WIRED_QUERY.to_string()));
+    };
+    match query.browse(peer.to_string(), path.to_string()).await {
+        Ok(payload) => {
+            let roots = payload
+                .get("roots")
+                .cloned()
+                .map(serde_json::from_value::<Vec<BrowseRoot>>)
+                .transpose();
+            let entries = payload
+                .get("entries")
+                .cloned()
+                .map(serde_json::from_value::<Vec<WorkspaceFileEntry>>)
+                .transpose();
+            match (roots, entries) {
+                (Ok(roots), Ok(entries)) => (
+                    roots.unwrap_or_default(),
+                    entries.unwrap_or_default(),
+                    None,
+                ),
+                (Err(error), _) | (_, Err(error)) => (
+                    Vec::new(),
+                    Vec::new(),
+                    Some(format!(
+                        "对端返回的目录浏览结果无法解析（对端版本可能较旧）: {error}"
+                    )),
+                ),
+            }
+        }
+        Err(message) => (Vec::new(), Vec::new(), Some(message)),
+    }
 }
 
 /// 目录选择器的浏览根：HOME + 全部已加载 persona 的工作区目录（去重）。
@@ -565,6 +706,280 @@ mod tests {
         .await
         .expect("claimed");
         assert!(outcome.unwrap_err().contains("不存在"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 跨机查询接缝（`node://` 目录）──────────────────────────────────
+
+    /// 假的跨机查询：记录收到的 `(peer, path)`，按预设回包或报错。
+    ///
+    /// 用真的 trait 而不是桩函数：这样"模块确实按服务键取到了句柄、并按
+    /// 语义方法调用"这件事被端到端覆盖，而不只是测到我们自己的分支。
+    struct FakeQuery {
+        git: Result<Value, String>,
+        files: Result<Value, String>,
+        browse: Result<Value, String>,
+        calls: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+    }
+
+    impl FakeQuery {
+        fn new(git: Result<Value, String>) -> Self {
+            Self {
+                git,
+                files: Ok(json!({"entries": []})),
+                browse: Ok(json!({"roots": [], "entries": []})),
+                calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn record(&self, kind: &str, peer: &str, path: &str) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((kind.to_string(), peer.to_string(), path.to_string()));
+        }
+    }
+
+    impl crate::remote::RemoteWorkspaceQuery for FakeQuery {
+        fn git_status(&self, peer: String, path: String) -> crate::remote::QueryFuture {
+            self.record("git", &peer, &path);
+            let result = self.git.clone();
+            Box::pin(async move { result })
+        }
+
+        fn list_files(&self, peer: String, path: String) -> crate::remote::QueryFuture {
+            self.record("files", &peer, &path);
+            let result = self.files.clone();
+            Box::pin(async move { result })
+        }
+
+        fn browse(&self, peer: String, path: String) -> crate::remote::QueryFuture {
+            self.record("browse", &peer, &path);
+            let result = self.browse.clone();
+            Box::pin(async move { result })
+        }
+    }
+
+    /// 建一个含远程目录的会话，并把事件出口接上。
+    async fn state_with_remote_dir(
+        dir: &std::path::Path,
+        directories: Value,
+    ) -> (Arc<ModuleState>, Arc<std::sync::Mutex<Vec<Value>>>) {
+        let _ = std::fs::remove_dir_all(dir);
+        let state = state_with(dir);
+        let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let seen = seen.clone();
+            state.set_event_sink(Arc::new(move |event| {
+                if event.name == crate::events::BACKEND_EVENT {
+                    seen.lock().unwrap().push(event.payload);
+                }
+            }));
+        }
+        handle(
+            &state,
+            "SaveWorkspaceSession",
+            json!({
+                "team_id": "t",
+                "session": {"id": "s", "name": "s", "directories": directories},
+            }),
+        )
+        .await
+        .expect("claimed")
+        .expect("saved");
+        (state, seen)
+    }
+
+    /// 注入接缝后，远程目录真的去问了宿主，且 `directory` 被换回
+    /// `node://` 规范形状（否则面板按本机目录归组）。
+    #[tokio::test]
+    async fn remote_git_status_uses_injected_query() {
+        let dir = std::env::temp_dir().join(format!("echo-ws-cmd-rgit-{}", std::process::id()));
+        let fake = Arc::new(FakeQuery::new(Ok(json!({
+            "git": {
+                "directory": "/srv/repo",
+                "is_repo": true,
+                "branch": "main",
+                "modified": 3,
+            }
+        }))));
+        let (state, seen) =
+            state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
+        state.set_remote_query(Some(fake.clone()));
+
+        handle(
+            &state,
+            "RequestWorkspaceGitStatus",
+            json!({"team_id": "t", "session_id": "s"}),
+        )
+        .await
+        .expect("claimed")
+        .expect("ok");
+
+        let calls = fake.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![("git".into(), "gpu-box".into(), "/srv/repo".into())],
+            "应按语义方法问到对端绝对路径"
+        );
+        let status = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|value| value.get("WorkspaceGitStatus").cloned())
+            .expect("应有 WorkspaceGitStatus 事件");
+        let git = &status["directories"][0];
+        assert_eq!(git["directory"], "node://gpu-box/srv/repo");
+        assert_eq!(git["is_repo"], true);
+        assert_eq!(git["branch"], "main");
+        assert!(git["error"].is_null());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 对端报错 → 只该目录降级成占位（带对端原因），不抛错、不拖累别的目录。
+    #[tokio::test]
+    async fn remote_git_status_failure_degrades_to_placeholder() {
+        let dir = std::env::temp_dir().join(format!("echo-ws-cmd-rgitf-{}", std::process::id()));
+        let fake = Arc::new(FakeQuery::new(Err(
+            "远程节点「gpu-box」不在线或不存在（跨机工作区查询）".to_string(),
+        )));
+        let (state, seen) =
+            state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
+        state.set_remote_query(Some(fake));
+
+        handle(
+            &state,
+            "RequestWorkspaceGitStatus",
+            json!({"team_id": "t", "session_id": "s"}),
+        )
+        .await
+        .expect("claimed")
+        .expect("远程失败不该让整条命令失败");
+
+        let status = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|value| value.get("WorkspaceGitStatus").cloned())
+            .expect("应有 WorkspaceGitStatus 事件");
+        let git = &status["directories"][0];
+        assert_eq!(git["directory"], "node://gpu-box/srv/repo");
+        assert_eq!(git["is_repo"], false);
+        assert!(
+            git["error"].as_str().unwrap_or_default().contains("不在线"),
+            "错误文案应透传对端原因: {git:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 未注入接缝（单机部署）→ 占位，文案说明是"未接线"。
+    #[tokio::test]
+    async fn remote_git_status_without_seam_is_placeholder() {
+        let dir = std::env::temp_dir().join(format!("echo-ws-cmd-rgitn-{}", std::process::id()));
+        let (state, seen) =
+            state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
+        handle(
+            &state,
+            "RequestWorkspaceGitStatus",
+            json!({"team_id": "t", "session_id": "s"}),
+        )
+        .await
+        .expect("claimed")
+        .expect("ok");
+        let status = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|value| value.get("WorkspaceGitStatus").cloned())
+            .expect("应有 WorkspaceGitStatus 事件");
+        let git = &status["directories"][0];
+        assert_eq!(git["is_repo"], false);
+        assert!(git["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("未接线"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 文件浏览：远程路径走接缝（面板要的是空结果 + error，不是抛错）。
+    #[tokio::test]
+    async fn remote_files_use_injected_query() {
+        let dir = std::env::temp_dir().join(format!("echo-ws-cmd-rfiles-{}", std::process::id()));
+        let fake = Arc::new(FakeQuery {
+            git: Ok(json!({})),
+            files: Ok(json!({"entries": [
+                {"name": "Cargo.toml", "path": "/srv/repo/Cargo.toml", "is_dir": false, "size": 42}
+            ]})),
+            browse: Ok(json!({"roots": [], "entries": []})),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let (state, seen) =
+            state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
+        state.set_remote_query(Some(fake.clone()));
+
+        handle(
+            &state,
+            "RequestWorkspaceFiles",
+            json!({"team_id": "t", "session_id": "s", "path": "node://gpu-box/srv/repo"}),
+        )
+        .await
+        .expect("claimed")
+        .expect("ok");
+
+        assert_eq!(
+            fake.calls.lock().unwrap().clone(),
+            vec![("files".into(), "gpu-box".into(), "/srv/repo".into())]
+        );
+        let event = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|value| value.get("WorkspaceFiles").cloned())
+            .expect("应有 WorkspaceFiles 事件");
+        assert_eq!(event["entries"][0]["name"], "Cargo.toml");
+        assert!(event["error"].is_null());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 目录浏览：根列表请求（`node://peer/`）剥成对端 `"/"`。
+    #[tokio::test]
+    async fn remote_browse_uses_injected_query() {
+        let dir = std::env::temp_dir().join(format!("echo-ws-cmd-rbrowse-{}", std::process::id()));
+        let fake = Arc::new(FakeQuery {
+            git: Ok(json!({})),
+            files: Ok(json!({"entries": []})),
+            browse: Ok(json!({
+                "roots": [{"label": "gpu-box", "path": "/srv"}],
+                "entries": [],
+            })),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let (state, seen) =
+            state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
+        state.set_remote_query(Some(fake.clone()));
+
+        handle(
+            &state,
+            "RequestBrowseDirectories",
+            json!({"team_id": "t", "path": "node://gpu-box/"}),
+        )
+        .await
+        .expect("claimed")
+        .expect("ok");
+
+        assert_eq!(
+            fake.calls.lock().unwrap().clone(),
+            vec![("browse".into(), "gpu-box".into(), "/".into())],
+            "`node://peer/` 应剥成对端根目录"
+        );
+        let event = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|value| value.get("BrowseDirectories").cloned())
+            .expect("应有 BrowseDirectories 事件");
+        assert_eq!(event["roots"][0]["path"], "/srv");
+        assert!(event["error"].is_null());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

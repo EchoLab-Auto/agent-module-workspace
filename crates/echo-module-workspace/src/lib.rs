@@ -48,6 +48,7 @@ pub mod commands;
 pub mod files;
 pub mod git;
 pub mod prompt;
+pub mod remote;
 pub mod store;
 pub mod tool;
 pub mod wire;
@@ -64,6 +65,10 @@ pub use files::{
     resolve_within_directories, FILES_CAP,
 };
 pub use git::{collect_dir_git, CHANGED_FILES_CAP, GIT_TIMEOUT};
+pub use remote::{
+    join_node_path, split_node_path, QueryFuture, RemoteQueryHandle, RemoteWorkspaceQuery,
+    REMOTE_QUERY,
+};
 pub use store::{
     channel_scope_id, parse_workspace_channel, ConversationDeleteHook, WorkspaceStore,
     MAX_DIRECTORIES,
@@ -141,6 +146,11 @@ pub struct ModuleState {
     stores: RwLock<HashMap<String, Arc<store::WorkspaceStore>>>,
     /// 宿主注入的事件出口（`MountContext::events`）。
     emit: RwLock<Option<echo_module::EventSink>>,
+    /// 跨机查询接缝（宿主按 [`remote::REMOTE_QUERY`] 注入；`None` = 单机部署）。
+    ///
+    /// 与 `emit` 同款：进程级单例上的一个槽，`mount` 时填一次。未注入时远程
+    /// 目录降级为「不可采集」占位——本机功能不受影响。
+    remote_query: RwLock<Option<remote::RemoteQueryHandle>>,
     /// 自引用（弱）：store 的变更钩子需要回调本状态，而本状态持有 store。
     /// 用 `Weak` 断开这条环，钩子在模块被卸载后自然失效。
     self_ref: RwLock<std::sync::Weak<ModuleState>>,
@@ -183,6 +193,7 @@ impl ModuleState {
             config: RwLock::new(config),
             stores: RwLock::new(HashMap::new()),
             emit: RwLock::new(None),
+            remote_query: RwLock::new(None),
             self_ref: RwLock::new(std::sync::Weak::new()),
             hook_id: NEXT_HOOK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
@@ -212,6 +223,19 @@ impl ModuleState {
     /// 注入事件出口（`mount` 时一次）。
     pub fn set_event_sink(&self, sink: echo_module::EventSink) {
         *self.emit.write().unwrap_or_else(|e| e.into_inner()) = Some(sink);
+    }
+
+    /// 注入跨机查询接缝（`mount` 时一次；`None` = 宿主没提供，保持降级）。
+    pub fn set_remote_query(&self, query: Option<remote::RemoteQueryHandle>) {
+        *self.remote_query.write().unwrap_or_else(|e| e.into_inner()) = query;
+    }
+
+    /// 当前的跨机查询接缝（克隆一次 `Arc`：调用方可能跨 await 持有）。
+    pub fn remote_query(&self) -> Option<remote::RemoteQueryHandle> {
+        self.remote_query
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 
     /// 发一条模块事件（无出口时静默丢弃——单测/裸装配场景）。
@@ -254,6 +278,7 @@ impl ModuleState {
     /// - 写命令（`SetSessionApi` → `WorkspaceSetConversationApiProfile`）命中
     ///   一份，改内存 + 落盘；
     /// - 读命令（`RequestWorkspaceSessions`）命中另一份，返回**旧值**。
+    ///
     /// 表现就是"设置生效了、落盘也写了，但界面刷新后回到旧值"（2026-11
     /// 用户报障的确切现场：磁盘 `api_profile=deepseek`，广播里是 `kimi`）。
     pub fn store(&self, team_id: &str) -> Arc<store::WorkspaceStore> {
@@ -432,6 +457,16 @@ pub fn module_with_state(version: &str) -> (Arc<dyn Module>, Arc<ModuleState>) {
             if let Some(sink) = &ctx.events {
                 mount_state.set_event_sink(sink.clone());
             }
+            // 跨机查询接缝（组合根装配期注册）：`None` = 宿主没提供
+            // （单机部署 / 联邦关闭），远程目录按「不可采集」降级。
+            let remote_query = ctx.service(&remote::REMOTE_QUERY);
+            if remote_query.is_some() {
+                tracing::debug!(
+                    module = MODULE_ID,
+                    "workspace 模块已接入跨机查询（node:// 目录可采集）"
+                );
+            }
+            mount_state.set_remote_query(remote_query);
             Ok(Vec::new())
         })
         // 命令域：面板 7 条 + 宿主内部 2 条 + 工具入口 1 条。
