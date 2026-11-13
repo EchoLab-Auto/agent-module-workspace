@@ -596,3 +596,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod module_id_tests {
+    use super::*;
+
+    /// `MODULE_ID` 与 `module.toml` 的 `id` 必须一致。
+    ///
+    /// 宿主的 `WORKSPACE_MODULE_ID` 是它的别名（不是副本），所以这里分叉会
+    /// 同时打歪宿主门控与包标签——表现为「模块挂上了但门控认不出它」，或
+    /// 面板上出现一个名字对不上的条目，两者都不报错。
+    #[test]
+    fn module_id_matches_manifest() {
+        let declared = MANIFEST_TOML
+            .lines()
+            .find_map(|line| line.strip_prefix("id = "))
+            .map(|value| value.trim().trim_matches('"'))
+            .expect("module.toml 缺少顶层 id");
+        assert_eq!(declared, MODULE_ID);
+    }
+}

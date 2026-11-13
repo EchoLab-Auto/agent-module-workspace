@@ -54,8 +54,8 @@ dependencies = [
 
 [[package]]
 name = "echo-context"
-version = "0.15.0"
-source = "git+https://github.com/EchoLab-Auto/echo-fabric-arch?tag=v0.15.0#a0f16e09c58e8912c1d7b7206651172b0fee6274"
+version = "0.18.0"
+source = "git+https://github.com/EchoLab-Auto/echo-fabric-arch?tag=v0.18.0#c77e16e7be8bf618b8d86106fc95217cd5b691c1"
 dependencies = [
  "dashmap",
  "thiserror",
@@ -64,8 +64,8 @@ dependencies = [
 
 [[package]]
 name = "echo-module"
-version = "0.15.0"
-source = "git+https://github.com/EchoLab-Auto/echo-fabric-arch?tag=v0.15.0#a0f16e09c58e8912c1d7b7206651172b0fee6274"
+version = "0.18.0"
+source = "git+https://github.com/EchoLab-Auto/echo-fabric-arch?tag=v0.18.0#c77e16e7be8bf618b8d86106fc95217cd5b691c1"
 dependencies = [
  "echo-context",
  "serde",
