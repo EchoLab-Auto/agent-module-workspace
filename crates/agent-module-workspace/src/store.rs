@@ -628,7 +628,16 @@ fn normalize_directory(raw: &str) -> String {
 /// 对话读取视图：空列表（旧档/新建工作区）惰性补位存量主对话——
 /// `legacy: true` 表示其通道 id 为裸 ws 格式 `local:workspace:<ws>:<user>`
 ///（旧数据的历史挂在该 id 下，事件日志 append-only 不可改写）。
-pub(crate) fn conversations_view(session: &WorkspaceSessionInfo) -> Vec<WorkspaceConversationInfo> {
+///
+/// # 为什么是 `pub` 而不是 `pub(crate)`
+///
+/// 这条补位规则是**模块的领域知识**（`main` / `主对话` / `legacy: true` 的取值
+/// 与含义都定义在这里）。宿主的只读镜像也要用同一套规则给"事件丢失/竞态"兜底
+/// ——此前它在 Core 里抄了一份（`workspace_mirror.rs` 的 `active_pair`），两份
+/// 一致全靠注释提醒。
+///
+/// 导出之后宿主直接调这个函数，规则只有一处实现：改补位逻辑时宿主自动跟上。
+pub fn conversations_view(session: &WorkspaceSessionInfo) -> Vec<WorkspaceConversationInfo> {
     if session.conversations.is_empty() {
         vec![WorkspaceConversationInfo {
             id: "main".into(),
