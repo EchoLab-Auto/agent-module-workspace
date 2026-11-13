@@ -1,0 +1,12 @@
+# 工作区会话 —— 模块声明（**单一真值**：身份 + 依赖 + 提供）
+#
+# 代码用 `include_str!` 读这个文件构造 manifest（见 `src/lib.rs` 的
+# `manifest()`），改标题/描述不必改 Rust。
+
+id = "echo-agent.workspace"
+name = "工作区会话"
+kind = "tool"
+description = "基于工作空间的会话管理：Panel 多会话/多目录管理 + git 状态查看 + workspace 工具"
+builtin = true
+# 随 Core 发布（以 git 依赖参与 Core 构建），不随运行期配置变化。
+tag = "inner"

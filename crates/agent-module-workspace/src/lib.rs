@@ -396,16 +396,16 @@ impl ModuleState {
     }
 }
 
-/// 模块 manifest（id / 名称 / 描述的唯一事实来源）。
+/// 模块声明文件——身份写在 TOML 里（单一真值）。
+///
+/// `include_str!` 而不是运行期读盘：清单是编译期常量，散在部署目录里会让
+/// "同一个二进制在不同机器上表现不同"。
+pub const MANIFEST_TOML: &str = include_str!("../module.toml");
+
+/// 模块 manifest：从 [`MANIFEST_TOML`] 解析，只把版本号留给宿主注入。
 pub fn manifest(version: &str) -> ModuleManifest {
-    ModuleManifest::builtin(
-        MODULE_ID,
-        "工作区会话",
-        version,
-        "tool",
-        "workspace",
-        "基于工作空间的会话管理：Panel 多会话/多目录管理 + git 状态查看 + workspace 工具",
-    )
+    ModuleManifest::from_toml(MANIFEST_TOML, version)
+        .expect("agent-module-workspace 的 module.toml 解析失败")
 }
 
 /// 构造模块（宿主装配期调用一次；模块被禁用/未挂载时不监听、不落盘）。
