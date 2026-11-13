@@ -12,11 +12,11 @@ repository = "https://github.com/EchoLab-Auto/crate-workspace"
 [workspace.dependencies]
 # 框架仓（模块 trait / 挂载上下文）。与 EchoAgentCore 根 Cargo.toml 保持同一
 # tag，避免同一进程里出现两份框架类型（Box<dyn Module> 不跨版本兼容）。
-echo-module = { git = "https://github.com/EchoLab-Auto/echo-fabric-arch", tag = "v0.15.0" }
-echo-context = { git = "https://github.com/EchoLab-Auto/echo-fabric-arch", tag = "v0.15.0" }
+echo-module = { git = "https://github.com/EchoLab-Auto/echo-fabric-arch", tag = "v0.16.1" }
+echo-context = { git = "https://github.com/EchoLab-Auto/echo-fabric-arch", tag = "v0.16.1" }
 # 本机验证用（`cargo test` 前取消注释）：
-# echo-module = { git = "https://github.com/EchoLab-Auto/echo-fabric-arch", tag = "v0.15.0" }
-# echo-context = { git = "https://github.com/EchoLab-Auto/echo-fabric-arch", tag = "v0.15.0" }
+# echo-module = { git = "https://github.com/EchoLab-Auto/echo-fabric-arch", tag = "v0.16.1" }
+# echo-context = { git = "https://github.com/EchoLab-Auto/echo-fabric-arch", tag = "v0.16.1" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
