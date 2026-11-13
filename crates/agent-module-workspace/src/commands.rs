@@ -29,17 +29,39 @@ use crate::ModuleState;
 /// 宿主原本直接调 store 的两个动作（会话级 API 覆盖的持久化、供应商改名传播）
 /// 现在跨了仓库边界，只能经命令通道回来。
 pub const COMMANDS: [&str; 9] = [
-    "RequestWorkspaceSessions",
-    "SaveWorkspaceSession",
-    "DeleteWorkspaceSession",
-    "ActivateWorkspaceSession",
-    "RequestWorkspaceGitStatus",
-    "RequestWorkspaceFiles",
-    "RequestBrowseDirectories",
+    REQUEST_SESSIONS,
+    SAVE_SESSION,
+    DELETE_SESSION,
+    ACTIVATE_SESSION,
+    REQUEST_GIT_STATUS,
+    REQUEST_FILES,
+    REQUEST_BROWSE_DIRECTORIES,
     // ── 宿主内部命令（见模块文档）──
-    "WorkspaceSetConversationApiProfile",
-    "WorkspaceRenameApiProfile",
+    SET_CONVERSATION_API_PROFILE,
+    RENAME_API_PROFILE,
 ];
+
+// 每个命令名单独具名导出：宿主（Core）要按名字分发其中两条内部命令，
+// 写裸字面量拼错的表现是「命令成功但什么都没改」——不报错。常量让拼错变成
+// 编译错误。数组顺序与名字的对应关系也由这里保证，不必靠人工核对。
+/// 面板请求：列出工作区会话。
+pub const REQUEST_SESSIONS: &str = "RequestWorkspaceSessions";
+/// 面板请求：新增/更新工作区会话。
+pub const SAVE_SESSION: &str = "SaveWorkspaceSession";
+/// 面板请求：删除工作区会话。
+pub const DELETE_SESSION: &str = "DeleteWorkspaceSession";
+/// 面板请求：激活工作区会话。
+pub const ACTIVATE_SESSION: &str = "ActivateWorkspaceSession";
+/// 面板请求：工作区 git 状态。
+pub const REQUEST_GIT_STATUS: &str = "RequestWorkspaceGitStatus";
+/// 面板请求：工作区文件列表。
+pub const REQUEST_FILES: &str = "RequestWorkspaceFiles";
+/// 面板请求：可浏览的目录根。
+pub const REQUEST_BROWSE_DIRECTORIES: &str = "RequestBrowseDirectories";
+/// 宿主内部：设置某条对话的会话级 API 覆盖。
+pub const SET_CONVERSATION_API_PROFILE: &str = "WorkspaceSetConversationApiProfile";
+/// 宿主内部：供应商改名向各会话的覆盖值传播。
+pub const RENAME_API_PROFILE: &str = "WorkspaceRenameApiProfile";
 
 /// `workspace` 工具的调用入口名（宿主把工具调用转发到这里）。
 ///
@@ -994,5 +1016,30 @@ mod tests {
             .unwrap_or(true)));
         assert!(roots.len() <= 1, "roots: {roots:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod command_name_tests {
+    use super::*;
+
+    /// 具名常量与 `COMMANDS` 数组必须一致。
+    ///
+    /// 宿主按 `COMMANDS` 判断"这条命令归我处理"，同时按具名常量分发；两边分叉
+    /// 的表现是「命令被本模块认领了，但分发时走不到对应分支」——静默无操作。
+    #[test]
+    fn named_constants_match_the_commands_array() {
+        let expected = [
+            REQUEST_SESSIONS,
+            SAVE_SESSION,
+            DELETE_SESSION,
+            ACTIVATE_SESSION,
+            REQUEST_GIT_STATUS,
+            REQUEST_FILES,
+            REQUEST_BROWSE_DIRECTORIES,
+            SET_CONVERSATION_API_PROFILE,
+            RENAME_API_PROFILE,
+        ];
+        assert_eq!(COMMANDS, expected);
     }
 }
