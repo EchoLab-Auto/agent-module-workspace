@@ -256,14 +256,22 @@ describe('SessionSwitcher 工作区多对话通道分组', () => {
   });
 });
 
-// ── 5. sessionApiOverrides：WorkspaceSessions 只替换工作区键 ─────────────
+// ── 5. sessionApiOverrides：工作区事件**不碰**它（2026-11 归 Core） ─────────
+//
+// 旧契约（本次删除）：`WorkspaceSessions` 会把工作区键从对话文档里重算一遍，
+// 非工作区键原样保留。问题是同一个键有两个作者——用户在工作区对话里清除覆盖
+// 后，Panel 仍能从陈旧文档推导出旧值，于是"清掉了又自己长回来"。
+//
+// 新契约：覆盖的**唯一**来源是 Core 的 `SessionApiOverrides` 事件（与路由
+// 依据同源）。`WorkspaceSessions` 只更新会话清单，覆盖字典一个键都不动。
 
-describe('sessionApiOverrides：WorkspaceSessions 只替换工作区键', () => {
-  it('非工作区会话（QQ 等）的乐观覆盖值被保留', () => {
+describe('sessionApiOverrides：工作区事件不让覆盖复活', () => {
+  it('WorkspaceSessions 不新增、不删除任何覆盖键', () => {
     let s = initialState();
-    // 非工作区键（如 QQ 会话的乐观覆盖）+ 一个旧的工作区键（应被权威数据替换）。
     s.sessionApiOverrides = {
+      // 乐观值（用户刚点完、Core 回执未到）
       'qq:group:12345:67890': 'qq-profile',
+      // 用户已清除、但对话文档里还残留旧值的键——绝不能被重新推导出来
       'local:workspace:old:local_user': 'stale-profile',
     };
     s = reduce(s, {
@@ -283,10 +291,30 @@ describe('sessionApiOverrides：WorkspaceSessions 只替换工作区键', () => 
       },
     } as unknown as BackendEvent);
 
-    // 非工作区键：保留（此前整体替换会误清）。
+    // 乐观值：未被误清。
     expect(s.sessionApiOverrides['qq:group:12345:67890']).toBe('qq-profile');
-    // 工作区键：按权威快照重算——旧键消失、新覆盖出现。
-    expect(s.sessionApiOverrides['local:workspace:old:local_user']).toBeUndefined();
-    expect(s.sessionApiOverrides['local:workspace:proj:local_user']).toBe('alpha');
+    // 陈旧键：不被重新推导（派生就会复活）。
+    expect(s.sessionApiOverrides['local:workspace:old:local_user']).toBe('stale-profile');
+    // 对话文档里的 api_profile 不再是覆盖的来源。
+    expect(s.sessionApiOverrides['local:workspace:proj:local_user']).toBeUndefined();
+  });
+
+  it('SessionApiOverrides 整体替换（Core 是唯一作者）', () => {
+    let s = initialState();
+    s.sessionApiOverrides = {
+      'qq:group:1:2': 'stale',
+      'local:tui::local_user': 'kimi',
+    };
+    s = reduce(s, {
+      SessionApiOverrides: {
+        team_id: 't1',
+        overrides: [{ session_id: 'local:workspace:proj:local_user', profile: 'alpha' }],
+      },
+    } as unknown as BackendEvent);
+
+    // 快照里没有的键 = 已经没有覆盖（合并会让已清除的条目永远留在前端）。
+    expect(s.sessionApiOverrides).toEqual({
+      'local:workspace:proj:local_user': 'alpha',
+    });
   });
 });
