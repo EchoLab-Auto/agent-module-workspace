@@ -933,7 +933,11 @@ mod tests {
                 last_conversation: None,
             })
             .expect("upsert");
-        assert_eq!(first.load(std::sync::atomic::Ordering::SeqCst), 1, "先注册者必须仍被通知");
+        assert_eq!(
+            first.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "先注册者必须仍被通知"
+        );
         assert_eq!(second.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // 同 key 重注册是幂等的（`ModuleState::store` 每次命中缓存都会重注册）

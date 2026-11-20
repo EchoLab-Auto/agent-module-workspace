@@ -330,9 +330,7 @@ async fn git_status(
         results[index] = Some(remote_git_status(state, &peer, &path).await);
     }
     if let Some(handle) = local_handle {
-        let collected = handle
-            .await
-            .map_err(|e| format!("git 采集失败: {e}"))?;
+        let collected = handle.await.map_err(|e| format!("git 采集失败: {e}"))?;
         for ((index, _), info) in local.into_iter().zip(collected) {
             results[index] = Some(info);
         }
@@ -576,11 +574,7 @@ async fn remote_browse(
     state: &ModuleState,
     peer: &str,
     path: &str,
-) -> (
-    Vec<BrowseRoot>,
-    Vec<WorkspaceFileEntry>,
-    Option<String>,
-) {
+) -> (Vec<BrowseRoot>, Vec<WorkspaceFileEntry>, Option<String>) {
     let Some(query) = state.remote_query() else {
         return (Vec::new(), Vec::new(), Some(NOT_WIRED_QUERY.to_string()));
     };
@@ -597,11 +591,9 @@ async fn remote_browse(
                 .map(serde_json::from_value::<Vec<WorkspaceFileEntry>>)
                 .transpose();
             match (roots, entries) {
-                (Ok(roots), Ok(entries)) => (
-                    roots.unwrap_or_default(),
-                    entries.unwrap_or_default(),
-                    None,
-                ),
+                (Ok(roots), Ok(entries)) => {
+                    (roots.unwrap_or_default(), entries.unwrap_or_default(), None)
+                }
                 (Err(error), _) | (_, Err(error)) => (
                     Vec::new(),
                     Vec::new(),
@@ -825,8 +817,7 @@ mod tests {
                 "modified": 3,
             }
         }))));
-        let (state, seen) =
-            state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
+        let (state, seen) = state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
         state.set_remote_query(Some(fake.clone()));
 
         handle(
@@ -865,8 +856,7 @@ mod tests {
         let fake = Arc::new(FakeQuery::new(Err(
             "远程节点「gpu-box」不在线或不存在（跨机工作区查询）".to_string(),
         )));
-        let (state, seen) =
-            state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
+        let (state, seen) = state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
         state.set_remote_query(Some(fake));
 
         handle(
@@ -898,8 +888,7 @@ mod tests {
     #[tokio::test]
     async fn remote_git_status_without_seam_is_placeholder() {
         let dir = std::env::temp_dir().join(format!("echo-ws-cmd-rgitn-{}", std::process::id()));
-        let (state, seen) =
-            state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
+        let (state, seen) = state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
         handle(
             &state,
             "RequestWorkspaceGitStatus",
@@ -916,10 +905,7 @@ mod tests {
             .expect("应有 WorkspaceGitStatus 事件");
         let git = &status["directories"][0];
         assert_eq!(git["is_repo"], false);
-        assert!(git["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("未接线"));
+        assert!(git["error"].as_str().unwrap_or_default().contains("未接线"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -935,8 +921,7 @@ mod tests {
             browse: Ok(json!({"roots": [], "entries": []})),
             calls: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
-        let (state, seen) =
-            state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
+        let (state, seen) = state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
         state.set_remote_query(Some(fake.clone()));
 
         handle(
@@ -976,8 +961,7 @@ mod tests {
             })),
             calls: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
-        let (state, seen) =
-            state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
+        let (state, seen) = state_with_remote_dir(&dir, json!(["node://gpu-box/srv/repo"])).await;
         state.set_remote_query(Some(fake.clone()));
 
         handle(

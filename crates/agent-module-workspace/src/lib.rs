@@ -232,10 +232,7 @@ impl ModuleState {
 
     /// 当前的跨机查询接缝（克隆一次 `Arc`：调用方可能跨 await 持有）。
     pub fn remote_query(&self) -> Option<remote::RemoteQueryHandle> {
-        self.remote_query
-            .read()
-            .ok()
-            .and_then(|slot| slot.clone())
+        self.remote_query.read().ok().and_then(|slot| slot.clone())
     }
 
     /// 发一条模块事件（无出口时静默丢弃——单测/裸装配场景）。
@@ -317,18 +314,21 @@ impl ModuleState {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             let team_id = team_id.to_string();
-            store.upsert_on_conversation_deleted(self.hook_id, Arc::new(move |workspace_id, conversation| {
-                if let Some(state) = weak.upgrade() {
-                    state.emit_event(
-                        events::CONVERSATION_DELETED,
-                        json!({
-                            "team_id": team_id,
-                            "workspace_id": workspace_id,
-                            "conversation": conversation,
-                        }),
-                    );
-                }
-            }));
+            store.upsert_on_conversation_deleted(
+                self.hook_id,
+                Arc::new(move |workspace_id, conversation| {
+                    if let Some(state) = weak.upgrade() {
+                        state.emit_event(
+                            events::CONVERSATION_DELETED,
+                            json!({
+                                "team_id": team_id,
+                                "workspace_id": workspace_id,
+                                "conversation": conversation,
+                            }),
+                        );
+                    }
+                }),
+            );
         }
         self.stores
             .write()

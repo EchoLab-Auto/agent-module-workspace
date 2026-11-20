@@ -82,7 +82,10 @@ pub fn split_node_path(raw: &str) -> Option<(String, String)> {
     if peer.is_empty() {
         return None;
     }
-    Some((peer.to_string(), format!("/{}", path.trim_start_matches('/'))))
+    Some((
+        peer.to_string(),
+        format!("/{}", path.trim_start_matches('/')),
+    ))
 }
 
 /// 把 `(peer, path)` 还原成 `node://<peer>/<path>` 的规范写法。
