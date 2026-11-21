@@ -33,21 +33,34 @@ import {
 import DirectoryPicker from './DirectoryPicker.vue';
 import { confirmDialog } from '@echo-agent/panel';
 import { ensureWorkspaceSessions, WORKSPACE_SESSIONS_KEY } from '../workspace-prefetch';
+import { workspace, workspaceRevision } from '../workspace-store';
 
 const props = defineProps<{ teamId: string | null }>();
 
 /** 当前列表归属 (team, core) 与请求目标一致才渲染（避免跨 team/core 串显）。 */
-const fresh = computed(
-  () =>
-    state.workspaceTeamId === props.teamId &&
-    (state.workspaceCore ?? null) === (state.activeRegion ?? null),
-);
-const sessions = computed(() => (fresh.value ? state.workspaceSessions : []));
-const activeId = computed(() => (fresh.value ? state.workspaceActive : null));
+const fresh = computed(() => {
+  // 依赖结构版本号：`workspace` 是普通对象（不是响应式），不读它就永远不重算。
+  void workspaceRevision.value;
+  return (
+    workspace.teamId === props.teamId &&
+    (workspace.core ?? null) === (state.activeRegion ?? null)
+  );
+});
+// 每个读投影的 computed 都**自己**读一次版本号：只让 `fresh` 读会踩 Vue 的
+// 短路——`fresh` 的布尔值没变时下游 computed 不会重算，数据换了也白换。
+const sessions = computed(() => {
+  void workspaceRevision.value;
+  return fresh.value ? workspace.sessions : [];
+});
+const activeId = computed(() => {
+  void workspaceRevision.value;
+  return fresh.value ? workspace.active : null;
+});
 /** 当前激活对话 id（2026-10 多对话；旧 Core 恒 null）。 */
-const activeConversationId = computed(() =>
-  fresh.value ? state.workspaceActiveConversation : null,
-);
+const activeConversationId = computed(() => {
+  void workspaceRevision.value;
+  return fresh.value ? workspace.activeConversation : null;
+});
 
 const selectedId = ref<string>('');
 const selected = computed(

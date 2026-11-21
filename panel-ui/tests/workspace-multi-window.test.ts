@@ -38,6 +38,7 @@ import {
   takeLocalActivateIntent,
 } from '../workspace';
 import type { WorkspaceSessionInfo } from '@echo-agent/panel';
+import { notifyChanged, workspace } from '../workspace-store';
 
 // ── fixture：一个带两条对话的工作区 ──
 const wsA: WorkspaceSessionInfo = {
@@ -222,10 +223,13 @@ describe('App 集成：他端广播不切换本窗口视图', () => {
     state.teams = [{ id: 'alix', name: 'Alix', enabled: true, sessions: 0 } as never];
     state.activeTeamId = 'alix';
     state.activeRegion = null;
-    state.workspaceTeamId = 'alix';
-    state.workspaceActive = null;
-    state.workspaceActiveConversation = null;
-    state.workspaceSessions = [wsA, wsB];
+    workspace.teamId = 'alix';
+  notifyChanged();
+    workspace.active = null;
+  notifyChanged();
+    workspace.activeConversation = null;
+    workspace.sessions = [wsA, wsB];
+  notifyChanged();
   });
 
   afterEach(() => {
@@ -247,7 +251,7 @@ describe('App 集成：他端广播不切换本窗口视图', () => {
     await nextTick();
 
     // workspace 状态同步了（面板高亮 / 激活标记照常更新）……
-    expect(state.workspaceActive).toBe('wsA');
+    expect(workspace.active).toBe('wsA');
     // ……但本窗口视图没被动过
     expect(wrapper.find('.stub-chat').text()).toBe(before);
     wrapper.unmount();
@@ -286,7 +290,7 @@ describe('App 集成：他端广播不切换本窗口视图', () => {
 // ── 二次修复回归（2026-10）：意图残留与 reset 落点 ──
 //
 // 首轮修复只做了「有意图才跟随」，但意图本身可能**永久残留**：
-// 消费点在 `state.workspaceTeamId !== activeTeamId` 时提前 return（切 agent 中 /
+// 消费点在 `workspace.teamId !== activeTeamId` 时提前 return（切 agent 中 /
 // 快照未到 / 跨 core 竞态），意图没被消费就留着 —— 之后任意窗口激活同一工作区
 // 都会命中残留，本窗口莫名跳转。故加 TTL + 对话维度匹配。
 describe('意图 TTL：残留不会长期生效', () => {

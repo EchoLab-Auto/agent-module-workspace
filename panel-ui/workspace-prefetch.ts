@@ -28,7 +28,7 @@
 
 import { sendPending } from '@echo-agent/panel';
 import { isPending } from '@echo-agent/panel';
-import { state } from '@echo-agent/panel';
+import { workspace, workspaceRevision } from './workspace-store';
 
 /** 等待键（与 `pending.ts::REQUEST_RESPONSES` 的登记键一致）。 */
 export const WORKSPACE_SESSIONS_KEY = 'workspace:sessions';
@@ -37,9 +37,9 @@ export const WORKSPACE_SESSIONS_KEY = 'workspace:sessions';
 export function workspaceSessionsFresh(teamId: string | null, core: string | null): boolean {
   if (!teamId) return false;
   return (
-    state.workspaceTeamId === teamId &&
-    (state.workspaceCore ?? null) === (core ?? null) &&
-    state.workspaceSessions.length > 0
+    (void workspaceRevision.value, workspace.teamId === teamId) &&
+    (workspace.core ?? null) === (core ?? null) &&
+    workspace.sessions.length > 0
   );
 }
 

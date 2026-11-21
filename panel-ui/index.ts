@@ -28,6 +28,7 @@ import {
   takeLocalActivateIntent,
   workspacePickIntent,
 } from './workspace';
+import { consumeEvent, resetCaches, workspace, workspaceRevision } from './workspace-store';
 
 function available(teamId: string | null): boolean {
   const team = teamId === null ? currentTeam(state) : state.teams.find((item) => item.id === teamId) ?? null;
@@ -36,11 +37,11 @@ function available(teamId: string | null): boolean {
 
 function workspaceCard(teamId: string | null): WorkspaceSessionInfo | null {
   const scope = teamId ?? state.teams[0]?.id ?? null;
-  if (!available(scope) || state.workspaceTeamId !== scope) return null;
+  if (!available(scope) || workspace.teamId !== scope) return null;
   const own = parseWorkspaceChannelId(state.windowSessionId ?? '')?.workspaceId ?? null;
-  const target = own ?? state.workspaceActive;
+  const target = own ?? workspace.active;
   if (!target) return null;
-  return state.workspaceSessions.find((session) => session.id === target) ?? null;
+  return workspace.sessions.find((session) => session.id === target) ?? null;
 }
 
 function sendWorkspaceActivate(context: PanelAppContext, id: string | null, conversation: string | null = null): void {
@@ -68,21 +69,23 @@ function recordWorkspaceDecision(entry: {
 }
 
 function setup(context: PanelAppContext): void {
+  // 依赖**结构版本号**：`workspace` 是普通对象，直接 watch 它的属性不会触发
+  //（这些字段是模块自己的，不是壳的 reactive state）。
   watch(
-    [() => state.workspaceTeamId, () => state.workspaceActive, () => state.workspaceActiveConversation],
+    () => workspaceRevision.value,
     () => {
-      if (state.workspaceTeamId !== context.teamId.value) return;
-      const mine = takeLocalActivateIntent(state.workspaceActive, state.workspaceActiveConversation);
+      if (workspace.teamId !== context.teamId.value) return;
+      const mine = takeLocalActivateIntent(workspace.active, workspace.activeConversation);
       const decision = decideOnWorkspaceBroadcast({
         currentSessionId: context.sessionId.value,
-        active: state.workspaceActive,
-        activeConversation: state.workspaceActiveConversation,
-        sessions: state.workspaceSessions,
+        active: workspace.active,
+        activeConversation: workspace.activeConversation,
+        sessions: workspace.sessions,
         hasLocalIntent: mine,
       });
       recordWorkspaceDecision({
-        active: state.workspaceActive,
-        activeConversation: state.workspaceActiveConversation,
+        active: workspace.active,
+        activeConversation: workspace.activeConversation,
         current: context.sessionId.value,
         mine,
         decision,
@@ -107,6 +110,8 @@ function setup(context: PanelAppContext): void {
       if (!wasConnected) {
         connectionEpoch += 1;
         wasConnected = true;
+        // 重连 = 新基线：按路径 / 按会话的缓存全部作废（列表由下面的请求重建）。
+        resetCaches();
       }
       const team = currentTeam(state);
       if (!team || !teamModuleEnabled(team, 'echo-agent.workspace')) return;
@@ -124,14 +129,21 @@ registerPanelExtension(definePanelExtension({
   hooks: {
     setup,
     teamLanding(teamId) {
-      if (state.workspaceTeamId !== teamId) return LOCAL_DEFAULT_SESSION;
-      return localSessionProjection(state.workspaceActive, state.workspaceActiveConversation, state.workspaceSessions);
+      if (workspace.teamId !== teamId) return LOCAL_DEFAULT_SESSION;
+      return localSessionProjection(workspace.active, workspace.activeConversation, workspace.sessions);
     },
     acceptEvent(event) {
+      // 工作区自己的三帧（会话列表 / git 状态 / 目录浏览）由本扩展归约，
+      // 不进壳的通用 reducer——壳里没有工作区的字段。
+      if (consumeEvent(event)) return false;
       const error = (event as { Error?: { session_id?: string | null; message?: string } }).Error;
       if (!error || error.session_id || typeof error.message !== 'string') return true;
       const activationNotice = /^(已激活工作区会话|已取消工作区会话激活)/.test(error.message);
       return !activationNotice || hasRecentLocalActivateIntent();
+    },
+    toolPresentation(tool) {
+      // 工作区工具（`workspace`）的图标归本模块；壳不认识这个名字。
+      return tool.name === 'workspace' ? { icon: 'workspace' } : null;
     },
     sessionPresentation(session) {
       return parseWorkspaceChannelId(session.id) ? { tag: '工作区', tagTone: 'accent' } : null;
@@ -142,10 +154,10 @@ registerPanelExtension(definePanelExtension({
     beforeSessionPick(id, context) {
       const intent = workspacePickIntent(
         id,
-        state.workspaceActive,
-        state.workspaceActiveConversation,
-        state.workspaceTeamId === context.teamId.value,
-        state.workspaceSessions,
+        workspace.active,
+        workspace.activeConversation,
+        workspace.teamId === context.teamId.value,
+        workspace.sessions,
       );
       if (intent.kind === 'activate') sendWorkspaceActivate(context, intent.workspaceId, intent.conversation);
       else if (intent.kind === 'deactivate') sendWorkspaceActivate(context, null);
@@ -165,7 +177,7 @@ registerPanelExtension(definePanelExtension({
     const session = workspaceCard(teamId);
     if (!session) return [];
     const scoped = sessionKey(state.activeRegion, session.id);
-    const dirs = state.workspaceGitBySession[scoped] ?? [];
+    const dirs = workspace.gitBySession[scoped] ?? [];
     const changed = dirs.reduce((sum, dir) => sum + (dir.staged ?? 0) + (dir.modified ?? 0) + (dir.untracked ?? 0), 0);
     return [
       {

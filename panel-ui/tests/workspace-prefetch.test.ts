@@ -24,6 +24,7 @@ vi.mock('@echo-agent/panel', async () => {
 import { sendCommand, sendPending } from '@echo-agent/panel';
 import { releasePending } from '@echo-agent/panel';
 import { state } from '@echo-agent/panel';
+import { notifyChanged, workspace } from '../workspace-store';
 import {
   WORKSPACE_SESSIONS_KEY,
   ensureWorkspaceSessions,
@@ -43,9 +44,12 @@ describe('工作区会话预取', () => {
     vi.mocked(sendCommand).mockClear();
     vi.mocked(sendPending).mockClear();
     releasePending(WORKSPACE_SESSIONS_KEY);
-    state.workspaceSessions = [];
-    state.workspaceTeamId = null;
-    state.workspaceCore = null;
+    workspace.sessions = [];
+  notifyChanged();
+    workspace.teamId = null;
+  notifyChanged();
+    workspace.core = null;
+  notifyChanged();
   });
 
   it('没有 team 时不发（Core 会拒绝无 team_id 的会话类命令）', () => {
@@ -54,9 +58,12 @@ describe('工作区会话预取', () => {
   });
 
   it('本地已有本 agent 的新鲜数据时不发', () => {
-    state.workspaceSessions = [{ id: 'core', name: '框架', directories: [] }];
-    state.workspaceTeamId = 'EchoCode';
-    state.workspaceCore = 'core-a';
+    workspace.sessions = [{ id: 'core', name: '框架', directories: [] }];
+  notifyChanged();
+    workspace.teamId = 'EchoCode';
+  notifyChanged();
+    workspace.core = 'core-a';
+  notifyChanged();
 
     expect(workspaceSessionsFresh('EchoCode', 'core-a')).toBe(true);
     expect(ensureWorkspaceSessions('EchoCode', 'core-a')).toBe(false);
@@ -64,14 +71,18 @@ describe('工作区会话预取', () => {
   });
 
   it('数据属于别的 agent / 别的 core 时不算新鲜，必须重发', () => {
-    state.workspaceSessions = [{ id: 'core', name: '框架', directories: [] }];
-    state.workspaceTeamId = 'Alice';
-    state.workspaceCore = 'core-a';
+    workspace.sessions = [{ id: 'core', name: '框架', directories: [] }];
+  notifyChanged();
+    workspace.teamId = 'Alice';
+  notifyChanged();
+    workspace.core = 'core-a';
+  notifyChanged();
 
     // 换 agent
     expect(workspaceSessionsFresh('EchoCode', 'core-a')).toBe(false);
     // 同 agent 换 core（多上游：同名 agent 在两个 core 上都有）
-    state.workspaceTeamId = 'EchoCode';
+    workspace.teamId = 'EchoCode';
+  notifyChanged();
     expect(workspaceSessionsFresh('EchoCode', 'core-b')).toBe(false);
   });
 

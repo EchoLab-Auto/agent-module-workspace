@@ -25,20 +25,26 @@ import WorkspaceFileBrowser from '../WorkspaceFileBrowser.vue';
 import { state } from '@echo-agent/panel';
 import { sendCommand } from '@echo-agent/panel';
 import type { WorkspaceSessionInfo } from '@echo-agent/panel';
+import { notifyChanged, workspace } from '../../workspace-store';
 
 function seed(sessions: WorkspaceSessionInfo[], active: string | null = null, team = 'EchoCode') {
-  state.workspaceSessions = sessions;
-  state.workspaceActive = active;
-  state.workspaceTeamId = team;
-  state.workspaceGitBySession = {};
-  state.workspaceFiles = {};
+  workspace.sessions = sessions;
+  notifyChanged();
+  workspace.active = active;
+  notifyChanged();
+  workspace.teamId = team;
+  notifyChanged();
+  workspace.gitBySession = {};
+  notifyChanged();
+  workspace.files = {};
   state.connected = true;
+  notifyChanged();
 }
 
 function mountBrowser() {
-  const session = state.workspaceSessions[0] ?? null;
+  const session = workspace.sessions[0] ?? null;
   return mount(WorkspaceFileBrowser, {
-    props: { teamId: state.workspaceTeamId, session },
+    props: { teamId: workspace.teamId, session },
   });
 }
 
@@ -84,13 +90,14 @@ describe('WorkspaceFileBrowser 文件浏览器（右侧边栏）', () => {
     expect(wrapper.find('.wfb-trow--root .nm-spinner').exists()).toBe(true);
 
     // 回推目录内容：src/ 子目录 + 文件。
-    state.workspaceFiles['/srv/core'] = {
+    workspace.files['/srv/core'] = {
       entries: [
         { name: 'src', path: '/srv/core/src', is_dir: true, size: 0 },
         { name: 'Cargo.toml', path: '/srv/core/Cargo.toml', is_dir: false, size: 2048 },
       ],
       error: null,
     };
+  notifyChanged();
     await nextTick();
     expect(wrapper.text()).toContain('src');
     expect(wrapper.text()).toContain('Cargo.toml');
@@ -105,10 +112,11 @@ describe('WorkspaceFileBrowser 文件浏览器（右侧边栏）', () => {
     expect(wrapper.find('.wfb-trow--dir.is-open')).toBeTruthy();
 
     // 回推子目录内容 → 子行出现。
-    state.workspaceFiles['/srv/core/src'] = {
+    workspace.files['/srv/core/src'] = {
       entries: [{ name: 'main.rs', path: '/srv/core/src/main.rs', is_dir: false, size: 100 }],
       error: null,
     };
+  notifyChanged();
     await nextTick();
     expect(wrapper.text()).toContain('main.rs');
 
@@ -135,7 +143,8 @@ describe('WorkspaceFileBrowser 文件浏览器（右侧边栏）', () => {
     expect(requestedPaths()).toEqual(['/srv/panel']);
 
     // 空目录回推 → （空目录）占位行；两根均展开。
-    state.workspaceFiles['/srv/panel'] = { entries: [], error: null };
+    workspace.files['/srv/panel'] = { entries: [], error: null };
+  notifyChanged();
     await nextTick();
     expect(wrapper.text()).toContain('（空目录）');
     expect(wrapper.findAll('.wfb-trow--root.is-open').length).toBe(2);
@@ -146,10 +155,11 @@ describe('WorkspaceFileBrowser 文件浏览器（右侧边栏）', () => {
     seed([{ id: 'core', name: '框架', directories: ['/srv/core'] }]);
     const wrapper = mountBrowser();
     await nextTick();
-    state.workspaceFiles['/srv/core'] = {
+    workspace.files['/srv/core'] = {
       entries: [],
       error: '路径不在该会话的工作区目录内',
     };
+  notifyChanged();
     await nextTick();
     const err = wrapper.find('.wfb-trow--error');
     expect(err.exists()).toBe(true);
@@ -198,7 +208,7 @@ describe('WorkspaceFileBrowser 文件浏览器（右侧边栏）', () => {
   it('team 未选择时不发任何命令；无会话显示空态', async () => {
     seed([{ id: 'core', name: '框架', directories: ['/srv/core'] }]);
     const w1 = mount(WorkspaceFileBrowser, {
-      props: { teamId: null, session: state.workspaceSessions[0] ?? null },
+      props: { teamId: null, session: workspace.sessions[0] ?? null },
     });
     await nextTick();
     expect(requestedPaths()).toEqual([]);
@@ -216,10 +226,11 @@ describe('WorkspaceFileBrowser 文件浏览器（右侧边栏）', () => {
     seed([{ id: 'core', name: '框架', directories: ['/srv/core'] }]);
     const wrapper = mountBrowser();
     await nextTick();
-    state.workspaceFiles['/srv/core'] = {
+    workspace.files['/srv/core'] = {
       entries: [{ name: 'src', path: '/srv/core/src', is_dir: true, size: 0 }],
       error: null,
     };
+  notifyChanged();
     await nextTick();
 
     // 展开子目录（当前展开 = 根 + src）

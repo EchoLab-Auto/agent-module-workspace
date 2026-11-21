@@ -2,7 +2,7 @@
 //!
 //! 背景：Core 的 workspace store 是 **per-persona**（每个 agent 一份），
 //! `WorkspaceSessions` 广播经进程级 EventSink 发给**所有** Panel 连接，且
-//! 载荷带 `team_id`。而 Panel 侧的工作区状态是**单槽**（`state.workspaceSessions`
+//! 载荷带 `team_id`。而 Panel 侧的工作区状态是**单槽**（`workspace.sessions`
 //! / `workspaceActive` / `workspaceTeamId` …）。
 //!
 //! 缺 team 过滤时的后果（本测试锁定的缺陷）：
@@ -18,9 +18,10 @@
 //! 为 null 的旧 Core 帧仍放行；`activeTeamId` 未定时不猜、放行等待校正）。
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { initialState, reduce } from '@echo-agent/panel';
+import { initialState, state as live } from '@echo-agent/panel';
 import type { AppState } from '@echo-agent/panel';
 import type { WorkspaceSessionInfo } from '@echo-agent/panel';
+import { consumeEvent, workspace } from '../workspace-store';
 
 const wsT1: WorkspaceSessionInfo = {
   id: 'alpha',
@@ -34,10 +35,23 @@ const wsT2: WorkspaceSessionInfo = {
   conversations: [{ id: 'main', name: '主线', legacy: true }],
 } as WorkspaceSessionInfo;
 
+/**
+ * 测试口径：这些过滤逻辑现在住在**模块自己的扩展**里（壳不再有工作区字段），
+ * 所以断言对象是 `workspace`（模块投影）+ 壳的通用身份 `live.activeTeamId` /
+ * `live.activeRegion`。行为与迁移前逐条等价——这正是本文件要守的东西。
+ */
 function base(): AppState {
   const s = initialState();
   s.activeTeamId = 't1';
   s.activeRegion = null;
+  // 投影回到干净状态（模块级单例）。
+  workspace.teamId = null;
+  workspace.core = null;
+  workspace.sessions = [];
+  workspace.active = null;
+  workspace.activeConversation = null;
+  workspace.generation = 0;
+  Object.assign(live, { activeTeamId: s.activeTeamId, activeRegion: s.activeRegion });
   return s;
 }
 
@@ -53,48 +67,48 @@ describe('WorkspaceSessions 跨 team 隔离', () => {
   });
 
   it('本 team 的快照正常落入单槽', () => {
-    s = reduce(s, ev('t1', [wsT1], 'alpha'));
-    expect(s.workspaceTeamId).toBe('t1');
-    expect(s.workspaceSessions.map((w) => w.id)).toEqual(['alpha']);
-    expect(s.workspaceActive).toBe('alpha');
+    consumeEvent(ev('t1', [wsT1], 'alpha'));
+    expect(workspace.teamId).toBe('t1');
+    expect(workspace.sessions.map((w) => w.id)).toEqual(['alpha']);
+    expect(workspace.active).toBe('alpha');
   });
 
   it('他 team 的广播被丢弃（不覆盖本 team 的单槽状态）', () => {
-    s = reduce(s, ev('t1', [wsT1], 'alpha'));
+    consumeEvent(ev('t1', [wsT1], 'alpha'));
     // 另一窗口（或模型的 use 工具）在 t2 上激活了工作区 → 广播打到本窗口
-    s = reduce(s, ev('t2', [wsT2], 'beta'));
+    consumeEvent(ev('t2', [wsT2], 'beta'));
     // 单槽仍是 t1 的快照 —— 这是修复点
-    expect(s.workspaceTeamId).toBe('t1');
-    expect(s.workspaceSessions.map((w) => w.id)).toEqual(['alpha']);
-    expect(s.workspaceActive).toBe('alpha');
+    expect(workspace.teamId).toBe('t1');
+    expect(workspace.sessions.map((w) => w.id)).toEqual(['alpha']);
+    expect(workspace.active).toBe('alpha');
   });
 
   it('切 agent 后，旧 agent 的迟到快照不污染新 agent', () => {
-    s = reduce(s, ev('t1', [wsT1], 'alpha'));
-    s.activeTeamId = 't2'; // App 切 agent
-    s = reduce(s, ev('t2', [wsT2], 'beta')); // 新 agent 的快照到达并生效
-    expect(s.workspaceTeamId).toBe('t2');
+    consumeEvent(ev('t1', [wsT1], 'alpha'));
+    live.activeTeamId = 't2'; // App 切 agent
+    consumeEvent(ev('t2', [wsT2], 'beta')); // 新 agent 的快照到达并生效
+    expect(workspace.teamId).toBe('t2');
     // t1 的迟到广播（请求在切换前发出）此时才到 → 必须丢弃
-    s = reduce(s, ev('t1', [wsT1], 'alpha'));
-    expect(s.workspaceTeamId).toBe('t2');
-    expect(s.workspaceSessions.map((w) => w.id)).toEqual(['beta']);
-    expect(s.workspaceActive).toBe('beta');
+    consumeEvent(ev('t1', [wsT1], 'alpha'));
+    expect(workspace.teamId).toBe('t2');
+    expect(workspace.sessions.map((w) => w.id)).toEqual(['beta']);
+    expect(workspace.active).toBe('beta');
   });
 
   it('旧 Core 帧 team_id = null 仍放行（兼容）', () => {
-    s = reduce(s, ev(null, [wsT1], 'alpha'));
-    expect(s.workspaceSessions.map((w) => w.id)).toEqual(['alpha']);
+    consumeEvent(ev(null, [wsT1], 'alpha'));
+    expect(workspace.sessions.map((w) => w.id)).toEqual(['alpha']);
   });
 
   it('activeTeamId 未定时不猜、放行（等 TeamsList 校正后 App 会重拉）', () => {
-    s.activeTeamId = null;
-    s = reduce(s, ev('t9', [wsT1], 'alpha'));
-    expect(s.workspaceTeamId).toBe('t9');
+    live.activeTeamId = null;
+    consumeEvent(ev('t9', [wsT1], 'alpha'));
+    expect(workspace.teamId).toBe('t9');
   });
 
   it('跨 core 的旧过滤仍生效（core 不匹配直接丢弃）', () => {
-    s.activeRegion = 'coreA';
-    s = reduce(s, { WorkspaceSessions: { team_id: 't1', sessions: [wsT1], active: 'alpha', core: 'coreB' } } as never);
-    expect(s.workspaceSessions).toEqual([]);
+    live.activeRegion = 'coreA';
+    consumeEvent({ WorkspaceSessions: { team_id: 't1', sessions: [wsT1], active: 'alpha', core: 'coreB' } } as never);
+    expect(workspace.sessions).toEqual([]);
   });
 });

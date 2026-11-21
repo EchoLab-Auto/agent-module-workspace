@@ -26,7 +26,7 @@
 //!
 //! 数据流：挂载 / 切换工作区会话 / 重连时发 `RequestWorkspaceGitStatus`
 //! （必须带 `team_id`，否则 Core 路由到默认 agent），Core 以
-//! `WorkspaceGitStatus` 回推按目录分组的快照，落 `state.workspaceGitBySession`。
+//! `WorkspaceGitStatus` 回推按目录分组的快照，落 `workspace.gitBySession`。
 //! 不做轮询 —— git 状态只在用户主动改代码后变，刷新按钮 + 上述时机足够；
 //! 定时拉会把 `git status` 变成常驻后台开销（工作区目录可能是跨机节点）。
 //!
@@ -43,6 +43,7 @@ import type {
   WorkspaceGitInfo,
   WorkspaceSessionInfo,
 } from '@echo-agent/panel';
+import { workspace, workspaceRevision } from '../workspace-store';
 
 /** 一类变更（Core 只回传两列状态字符，归类是这里的事）。 */
 type ChangeKind = 'staged' | 'modified' | 'untracked';
@@ -87,7 +88,8 @@ let settleTimer: number | undefined;
 /** 当前会话的 git 快照（按目录）。 */
 const dirs = computed(() =>
   props.session
-    ? (state.workspaceGitBySession[sessionKey(state.activeRegion, props.session.id)] ?? [])
+    ? (void workspaceRevision.value,
+       workspace.gitBySession[sessionKey(state.activeRegion, props.session.id)] ?? [])
     : [],
 );
 

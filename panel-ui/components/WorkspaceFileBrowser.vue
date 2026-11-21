@@ -28,6 +28,7 @@ import { scopedKey } from '@echo-agent/panel';
 import type { WorkspaceSessionInfo } from '@echo-agent/panel';
 import { directoryToInput, isRemoteDirectoryInput } from '../workspace';
 import PanelIcon from '@echo-agent/panel/components/PanelIcon';
+import { workspace, workspaceRevision } from '../workspace-store';
 
 const props = defineProps<{
   teamId: string | null;
@@ -44,7 +45,8 @@ const expanded = ref<Set<string>>(new Set());
 
 /** 某目录的缓存列表（Core 回推的 WorkspaceFiles）。 */
 function listingFor(path: string) {
-  return state.workspaceFiles[scopedKey(state.activeRegion, path)];
+  void workspaceRevision.value; // 非响应式对象：靠结构版本号建立依赖
+  return workspace.files[scopedKey(state.activeRegion, path)];
 }
 
 function basename(path: string): string {

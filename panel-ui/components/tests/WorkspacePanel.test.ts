@@ -27,19 +27,31 @@ import { state } from '@echo-agent/panel';
 import { releasePending, trackRequest } from '@echo-agent/panel';
 import { sendCommand } from '@echo-agent/panel';
 import type { WorkspaceSessionInfo } from '@echo-agent/panel';
+import { notifyChanged, workspace } from '../../workspace-store';
 
-function seed(sessions: WorkspaceSessionInfo[], active: string | null = null, team = 'EchoCode') {
-  state.workspaceSessions = sessions;
-  state.workspaceActive = active;
-  state.workspaceTeamId = team;
-  state.workspaceGitBySession = {};
-  state.workspaceFiles = {};
+function seed(
+  sessions: WorkspaceSessionInfo[],
+  active: string | null = null,
+  team = 'EchoCode',
+  core: string | null = null,
+) {
+  workspace.sessions = sessions;
+  workspace.active = active;
+  workspace.teamId = team;
+  // core 也要对齐：面板的 `fresh` 判据是 `(workspace.core) === (state.activeRegion)`，
+  // 种子只改 team 会留下一份"属于别的 core"的投影，组件按设计拒绝渲染。
+  workspace.core = core;
+  workspace.gitBySession = {};
+  workspace.files = {};
   state.connected = true;
+  // 直接写投影必须显式通知（`workspace` 不是响应式对象）。
+  notifyChanged();
 }
 
 describe('WorkspacePanel 工作区会话', () => {
   beforeEach(() => {
     vi.mocked(sendCommand).mockClear();
+    state.activeRegion = null;
     seed([]);
   });
 

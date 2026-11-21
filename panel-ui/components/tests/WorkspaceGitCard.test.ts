@@ -1,7 +1,7 @@
 //! 工作区 git 状态卡契约（workspace 模块，2026-10 从「工作区会话管理」面板迁入边栏）。
 //!
 //! 本卡只做三件事：按绑定的工作区会话拉一次 `RequestWorkspaceGitStatus`、
-//! 把 `state.workspaceGitBySession` 的快照渲染成**每目录一行**（点行展开细节）、
+//! 把 `wsStore.gitBySession` 的快照渲染成**每目录一行**（点行展开细节）、
 //! 提供手动刷新。锁定：请求时机（挂载 / 切会话 / 重连 / 手动）、行式渲染
 //! （名称 / 分支 / 同步 / 变更数 / 非仓库错误）、展开态默认值（单目录展开、
 //! 多目录收起、点过之后以用户为准）、按类别展开明细（计数即开关、小改动自动
@@ -24,6 +24,8 @@ import { state } from '@echo-agent/panel';
 import { sendCommand } from '@echo-agent/panel';
 import { sessionKey } from '@echo-agent/panel';
 import type { WorkspaceGitInfo, WorkspaceSessionInfo } from '@echo-agent/panel';
+//! store 里的 `workspace` 与本文件的工厂函数 `workspace()` 同名，取别名避免遮蔽。
+import { notifyChanged, workspace as wsStore } from '../../workspace-store';
 
 function workspace(over: Partial<WorkspaceSessionInfo> = {}): WorkspaceSessionInfo {
   return {
@@ -55,7 +57,8 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
     vi.mocked(sendCommand).mockClear();
     state.connected = true;
     state.activeRegion = null;
-    state.workspaceGitBySession = {};
+    wsStore.gitBySession = {};
+  notifyChanged();
     state.upstreams = [];
     state.federations = {};
     state.federation = null;
@@ -94,7 +97,7 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
   });
 
   it('单目录默认展开：分支/同步/计数/父目录/最近提交/文件 chip 全渲染', async () => {
-    state.workspaceGitBySession = {
+    wsStore.gitBySession = {
       [sessionKey(null, 'core')]: [
         info({
           directory: '/home/evence/code_file/gitlab/echo-tech/ui-frame',
@@ -109,6 +112,7 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
         }),
       ],
     };
+  notifyChanged();
     const wrapper = mount(WorkspaceGitCard, {
       props: { teamId: 'EchoCode', session: workspace() },
     });
@@ -138,12 +142,13 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
   });
 
   it('多目录默认收起：行上只有分支/计数，点行展开才出细节', async () => {
-    state.workspaceGitBySession = {
+    wsStore.gitBySession = {
       [sessionKey(null, 'core')]: [
         info({ directory: '/srv/a', branch: 'main', modified: 2, changed_files: ['a.rs'] }),
         info({ directory: '/srv/b', branch: 'dev', untracked: 1 }),
       ],
     };
+  notifyChanged();
     const wrapper = mount(WorkspaceGitCard, {
       props: { teamId: 'EchoCode', session: workspace() },
     });
@@ -163,9 +168,10 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
   });
 
   it('单目录默认展开，但点一下收起后以用户为准（刷新不再自动展开）', async () => {
-    state.workspaceGitBySession = {
+    wsStore.gitBySession = {
       [sessionKey(null, 'core')]: [info({ branch: 'main', modified: 1 })],
     };
+  notifyChanged();
     const wrapper = mount(WorkspaceGitCard, {
       props: { teamId: 'EchoCode', session: workspace() },
     });
@@ -174,21 +180,23 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
     await wrapper.find('.wgc-row').trigger('click');
     expect(wrapper.findAll('.wgc-detail').length).toBe(0);
     // 刷新（新快照）后仍保持收起
-    state.workspaceGitBySession = {
+    wsStore.gitBySession = {
       [sessionKey(null, 'core')]: [info({ branch: 'main', modified: 1 })],
     };
+  notifyChanged();
     await nextTick();
     expect(wrapper.findAll('.wgc-detail').length).toBe(0);
     wrapper.unmount();
   });
 
   it('干净仓库行显示 ✓；非仓库行显示 Core 的错误原因且不可展开', async () => {
-    state.workspaceGitBySession = {
+    wsStore.gitBySession = {
       [sessionKey(null, 'core')]: [
         info({ directory: '/srv/core', branch: 'main' }),
         info({ directory: '/srv/missing', is_repo: false, error: '目录不存在' }),
       ],
     };
+  notifyChanged();
     const wrapper = mount(WorkspaceGitCard, {
       props: { teamId: 'EchoCode', session: workspace() },
     });
@@ -206,13 +214,14 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
   });
 
   it('重名目录：补父目录末段消歧；唯一目录不加后缀', async () => {
-    state.workspaceGitBySession = {
+    wsStore.gitBySession = {
       [sessionKey(null, 'core')]: [
         info({ directory: '/w/echo-agent-core/source', branch: 'main' }),
         info({ directory: '/w/echo-agent-panel/source', branch: 'main' }),
         info({ directory: '/w/ui-frame', branch: 'main' }),
       ],
     };
+  notifyChanged();
     const wrapper = mount(WorkspaceGitCard, {
       props: { teamId: 'EchoCode', session: workspace() },
     });
@@ -228,11 +237,12 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
   });
 
   it('跨机目录：显示节点徽标，父目录剥掉 node://host 前缀', async () => {
-    state.workspaceGitBySession = {
+    wsStore.gitBySession = {
       [sessionKey(null, 'core')]: [
         info({ directory: 'node://A100-40g/home/evence/echo-agent-ui', branch: 'main' }),
       ],
     };
+  notifyChanged();
     const wrapper = mount(WorkspaceGitCard, {
       props: { teamId: 'EchoCode', session: workspace() },
     });
@@ -252,9 +262,10 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
       name: 'node-01m436f8', node_id: node, url: '', token_set: true, allow_tools: ['*'],
       allow_subagent: true, require_confirm: [], allow_queries: ['*'], link: 'Online',
     }] };
-    state.workspaceGitBySession = {
+    wsStore.gitBySession = {
       [sessionKey(null, 'core')]: [info({ directory: 'node://node-01m436f8/root/repo' })],
     };
+  notifyChanged();
     const wrapper = mount(WorkspaceGitCard, { props: { teamId: 'EchoCode', session: workspace() } });
     await nextTick();
     expect(wrapper.find('.wgc-node').text()).toBe('ai_station');
@@ -263,9 +274,10 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
   });
 
   it('切换会话 → 重新拉取新会话的状态（旧快照不串台，展开态重置）', async () => {
-    state.workspaceGitBySession = {
+    wsStore.gitBySession = {
       [sessionKey(null, 'core')]: [info({ branch: 'main', modified: 1 })],
     };
+  notifyChanged();
     const wrapper = mount(WorkspaceGitCard, {
       props: { teamId: 'EchoCode', session: workspace({ id: 'core' }) },
     });
@@ -298,9 +310,10 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
 
   it('刷新按钮：再发一次同一会话的请求；未连接时禁用', async () => {
     // 已有快照 → 挂载时不进加载态（按钮可点）且不闪「读取中…」
-    state.workspaceGitBySession = {
+    wsStore.gitBySession = {
       [sessionKey(null, 'core')]: [info({ branch: 'main' })],
     };
+  notifyChanged();
     const wrapper = mount(WorkspaceGitCard, {
       props: { teamId: 'EchoCode', session: workspace() },
     });
@@ -351,7 +364,8 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
   }
 
   function mountWith(dirs: WorkspaceGitInfo[]) {
-    state.workspaceGitBySession = { [sessionKey(null, 'core')]: dirs };
+    wsStore.gitBySession = { [sessionKey(null, 'core')]: dirs };
+  notifyChanged();
     return mount(WorkspaceGitCard, {
       props: { teamId: 'EchoCode', session: workspace() },
     });

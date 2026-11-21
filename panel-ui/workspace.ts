@@ -172,9 +172,9 @@ export type WorkspacePickIntent =
  * 点选意图（Local 分组双向绑定规则）。
  *
  * @param sessionId 被点选的会话 id
- * @param active    Core 已知的激活工作区（state.workspaceActive）
- * @param activeConversation Core 已知的激活对话（state.workspaceActiveConversation）
- * @param synced    该快照是否属于当前团队（state.workspaceTeamId === 当前 team）
+ * @param active    Core 已知的激活工作区（workspace.active）
+ * @param activeConversation Core 已知的激活对话（workspace.activeConversation）
+ * @param synced    该快照是否属于当前团队（workspace.teamId === 当前 team）
  * @param sessions  工作区快照（已知时传入）——已删除工作区的残留通道
  *   （历史保留）仅查看、不发激活（否则 Core 报「工作区会话 X 不存在」）；
  *   undefined/null = 不校验（快照未就绪）。同时用于把裸 ws 旧格式通道
@@ -231,7 +231,7 @@ export function workspacePickIntent(
 // 窗口无法各看各的。
 //
 // 解法：把「视图跟随」的触发条件限制为**本窗口自己发起的激活**。他端广播
-// 只同步 `state.workspaceActive` 等状态（工作区面板高亮、会话切换器的激活
+// 只同步 `workspace.active` 等状态（工作区面板高亮、会话切换器的激活
 // 标记照常更新），不改写本窗口的 activeSessionId。
 //
 // 代价（有意为之）：模型经 `use` 工具激活工作区时，其他窗口不会自动跳转
@@ -255,7 +255,7 @@ interface LocalActivateIntent {
  * 意图有效期。**这是本机制的关键防线**（2026-10 二次修复）：
  *
  * 意图只有在「回推被真正消费」时才清空，而消费点可能因为前置条件不满足而
- * **被跳过**——最典型的是 App 的跟随 watcher：`state.workspaceTeamId !==
+ * **被跳过**——最典型的是 App 的跟随 watcher：`workspace.teamId !==
  * activeTeamId` 时提前 return（切 agent 中、快照未到、跨 core 竞态）。此时
  * 意图留在内存里，等到**任意窗口**（另一浏览器 / 模型 `use` 工具）激活同一个
  * 工作区时命中残留 → 本窗口莫名其妙跟着跳。
