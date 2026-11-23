@@ -33,6 +33,9 @@
 //!   会话子系统，模块不认识它们**——模块只报告"状态变了"。
 //! - `workspace.conversation_deleted` — `{ team_id, workspace_id, conversation }`。
 //!   宿主负责清空该对话的通道历史（事件日志 / 投影 / 时间线）。
+//!   **C3b 起默认删除不再发它**：面板与工具都走
+//!   [`store::WorkspaceStore::delete_conversation_entry`]（只删入口、历史保留）；
+//!   该事件只剩旧入口 [`store::WorkspaceStore::delete_conversation`] 会触发。
 //!
 //! ## 启用
 //!
@@ -102,6 +105,9 @@ pub mod events {
     /// 工作区状态变更（宿主据ensure 通道 + 广播列表）。
     pub const CHANGED: &str = "workspace.changed";
     /// 对话被删除（宿主据此清空该对话的通道历史）。
+    ///
+    /// C3b 起默认删除（面板 / 工具）**不发**它——只删入口、保留历史；仅旧入口
+    /// `WorkspaceStore::delete_conversation` 触发，仓内已无生产调用方。
     pub const CONVERSATION_DELETED: &str = "workspace.conversation_deleted";
 }
 

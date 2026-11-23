@@ -7,10 +7,12 @@
 //! Core 以 `WorkspaceSessions` / `WorkspaceGitStatus` 事件回推。
 //! 弹层几何由 ChatView 的 `PanelPopover` 提供。
 //!
-//! 对话 CRUD：Core 无独立协议命令——经 `SaveWorkspaceSession` 全量
-//! upsert 会话（conversations 数组整体替换，面板侧镜像 Core
-//! `upsert_conversation` 的物化/slug/legacy 语义）；删除对话额外按通道
-//! id 发 `ClearHistory` 清空其聊天历史（两步确认，不可恢复）。
+//! 对话 CRUD：新建/改名仍经 `SaveWorkspaceSession` 全量 upsert 会话
+//!（conversations 整体替换，面板侧镜像 Core `upsert_conversation` 的
+//! 物化 / slug / legacy 语义）。**删除对话走模块私有写方法**
+//! `workspace.deleteConversation`（通用调用通道 `InvokeModuleOp`）：只删入口、
+//! 聊天历史保留、幂等、拒绝删最后一条；不先发 `ClearHistory`，失败也不退回
+//! 全量 upsert（配对与反馈见 `../workspace-conversation-delete.ts`）。
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
@@ -34,6 +36,12 @@ import DirectoryPicker from './DirectoryPicker.vue';
 import { confirmDialog } from '@echo-agent/panel';
 import { ensureWorkspaceSessions, WORKSPACE_SESSIONS_KEY } from '../workspace-prefetch';
 import { workspace, workspaceRevision } from '../workspace-store';
+import {
+  conversationDeleteResult,
+  conversationDeleteRevision,
+  requestConversationDelete,
+  retiredConversationIds,
+} from '../workspace-conversation-delete';
 
 const props = defineProps<{ teamId: string | null }>();
 
@@ -206,9 +214,10 @@ async function remove(session: WorkspaceSessionInfo) {
 }
 
 // ── 对话管理（2026-10 多对话）──
-// Core 无独立对话 CRUD 命令：经 SaveWorkspaceSession 全量 upsert 会话
-//（conversations 整体替换，镜像 Core upsert_conversation 的物化/slug/
-// legacy 语义）；删除对话额外按通道 id 发 ClearHistory 清空其聊天历史。
+// 新建 / 改名：经 SaveWorkspaceSession 全量 upsert 会话（conversations 整体
+// 替换，镜像 Core upsert_conversation 的物化 / slug / legacy 语义）。
+// 删除：模块私有写方法 `workspace.deleteConversation`（只删入口、历史保留，
+// 见 `../workspace-conversation-delete.ts`）。
 
 /** (工作区, 对话) 是否当前激活对。 */
 function isActiveConversation(
@@ -223,10 +232,9 @@ function saveConversations(
   session: WorkspaceSessionInfo,
   conversations: WorkspaceConversationInfo[],
   lastConversation?: string | null,
-  alreadyPending = false,
 ) {
   if (!props.teamId) return;
-  if (!alreadyPending && (actionPending.value || !beginAction(`conversation:${session.id}`))) return;
+  if (actionPending.value || !beginAction(`conversation:${session.id}`)) return;
   sendCommand({
     SaveWorkspaceSession: {
       team_id: props.teamId,
@@ -279,10 +287,17 @@ function saveConvForm(session: WorkspaceSessionInfo) {
   // 与 Core 写入路径 materialize_conversations 一致。
   const convs = conversationsView(session).map((c) => ({ ...c }));
   if (convForm.value.convId === null) {
-    const id = conversationIdForName(name, convs.map((c) => c.id));
-    // 镜像 Core：存量裸通道（legacy）每工作区至多一条；legacy 对话被删后
-    // 新对话可再次占用裸通道（其历史已在删除时清空）。
-    convs.push({ id, name, legacy: !convs.some((c) => c.legacy) });
+    // 新 id 要避开本窗口删过的 slug：被删对话的通道已退役（历史保留），
+    // 后端拒绝复用，撞上只会得到一条「请刷新后重试」的失败。
+    const retiredIds = retiredConversationIds(
+      props.teamId,
+      state.activeRegion ?? null,
+      session.id,
+    );
+    const id = conversationIdForName(name, [...convs.map((c) => c.id), ...retiredIds]);
+    // 新对话一律显式 `<ws>/<conv>` 通道：裸通道只属于存量 legacy 对话，
+    // 它一旦被删除就退役——不能再分配给新对话（否则新消息落进旧历史）。
+    convs.push({ id, name, legacy: false });
   } else {
     const target = convs.find((c) => c.id === convForm.value!.convId);
     if (!target) return;
@@ -292,27 +307,68 @@ function saveConvForm(session: WorkspaceSessionInfo) {
   convForm.value = null;
 }
 
+/** 正在等待回包的删除（同一时刻至多一条：`actionPending` 已单飞）。 */
+const pendingConversationDelete = ref<null | {
+  requestId: string;
+  core: string | null;
+  workspaceId: string;
+  conversationId: string;
+}>(null);
+
 async function removeConversation(session: WorkspaceSessionInfo, conv: WorkspaceConversationInfo) {
   if (!props.teamId || actionPending.value) return;
   const ok = await confirmDialog(
-    `删除对话「${conv.name}」？该对话的聊天历史将被清空，不可恢复。`,
+    `删除对话「${conv.name}」的入口？只移除列表条目，聊天历史会保留。`,
     { title: '删除对话', danger: true, confirmText: '删除' },
   );
   if (!ok) return;
   if (!beginAction(`conversation:${session.id}`)) return;
-  // 先清通道历史（legacy → 裸 ws 通道；其余 → <ws>/<conv> 通道）。
-  sendCommand({
-    ClearHistory: {
-      team_id: props.teamId,
-      session_id: workspaceChannelSessionId(session.id, conv),
-    },
-  });
-  const rest = conversationsView(session).filter((c) => c.id !== conv.id).map((c) => ({ ...c }));
-  // last_conversation 指向被删对话时回退首条（Core set_active 亦有兜底）。
-  const last =
-    session.last_conversation === conv.id ? (rest[0]?.id ?? null) : undefined;
-  saveConversations(session, rest, last, true);
+  // 默认删除 = 模块私有写方法（`InvokeModuleOp` → `workspace.deleteConversation`）：
+  // 只删入口、保留历史、幂等、拒绝最后一条。**绝不**先发 `ClearHistory`，
+  // 失败也不退回 `SaveWorkspaceSession` 全量 upsert（那会整表替换对话列表）。
+  const core = state.activeRegion ?? null;
+  const requestId = requestConversationDelete(props.teamId, core, session.id, conv.id);
+  if (!requestId) {
+    finishAction();
+    actionError.value =
+      conversationDeleteResult(props.teamId, core, session.id, conv.id)?.message
+      ?? '无法发送删除请求（未连接，或无法确定该人格所属运行区域）';
+    return;
+  }
+  pendingConversationDelete.value = {
+    requestId,
+    core,
+    workspaceId: session.id,
+    conversationId: conv.id,
+  };
 }
+
+/**
+ * 删除回包 → 组件反馈（配对在扩展入口的 `acceptEvent` 里完成，这里只消费终态）。
+ *
+ * - 成功：行随宿主广播消失；`already_absent` 说明本地快照陈旧 → 主动补拉一次；
+ * - 拒绝 / 超时：把模块给的原因显示在面板错误条上并结束动作。
+ * - 失败回执 `data:null` 没有 `request_id`，无法与请求配对（Core 广播给所有
+ *   窗口）：不认领、不误报，等本请求自己的超时提示「未收到可匹配回执」。
+ */
+watch(conversationDeleteRevision, () => {
+  const waiting = pendingConversationDelete.value;
+  if (!waiting) return;
+  const result = conversationDeleteResult(
+    props.teamId,
+    waiting.core,
+    waiting.workspaceId,
+    waiting.conversationId,
+  );
+  if (!result || result.requestId !== waiting.requestId || result.status === 'pending') return;
+  pendingConversationDelete.value = null;
+  finishAction();
+  if (result.status === 'ok') {
+    if (result.outcome === 'already_absent') requestSessions();
+    return;
+  }
+  actionError.value = result.message ?? '删除对话失败';
+});
 
 const { phase: sessionsPhase } = usePending(WORKSPACE_SESSIONS_KEY);
 
@@ -467,7 +523,7 @@ watch(
           </span>
           <span v-if="!(session.directories ?? []).length" class="muted">（尚未配置目录）</span>
         </div>
-        <!-- 对话管理（2026-10 多对话）：点选 = 切换激活对话；删除两步确认并清历史 -->
+        <!-- 对话管理（2026-10 多对话）：点选 = 切换激活对话；删除只删入口（聊天历史保留，C3b） -->
         <div class="ws-convs" @click.stop>
           <div class="ws-convs__head">
             <span class="ws-convs__title">对话</span>

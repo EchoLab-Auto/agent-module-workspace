@@ -9,9 +9,11 @@
 //!   `payload` = 模型给的参数对象，返回值 = 工具输出文本（包在 `{"content":…}`）。
 //!
 //! 语义与内置版本逐条一致（list / status / use / create / delete /
-//! conversations），含两处容易做错的地方：
+//! conversations），含三处容易做错的地方：
 //! - `status` 缺 `id` = 当前激活会话；没有激活会话时报错而不是返回空；
-//! - `conversations` 的 `id` 缺省 = 当前激活工作区。
+//! - `conversations` 的 `id` 缺省 = 当前激活工作区；
+//! - `conversations delete` 只删对话入口、聊天历史保留（C3b 起与面板默认
+//!   删除共用 `delete_conversation_entry`，不再触发宿主的历史清理钩子）。
 
 use std::sync::Arc;
 
@@ -275,10 +277,19 @@ fn conversations(store: &store::WorkspaceStore, arguments: &Value) -> Result<Str
                 .get("conversation_id")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "delete 需要 conversation_id".to_string())?;
-            match store.delete_conversation(&workspace_id, conversation_id)? {
-                Some(_) => Ok(format!("已删除对话 {conversation_id}（其通道历史已清空）")),
-                None => Err(format!(
+            // C3b：与面板默认删除走**同一个存储入口**（`delete_conversation_entry`）。
+            // 旧入口 `delete_conversation` 会触发宿主的历史清理钩子——删除入口
+            // 不再等于清空历史，工具也不提供额外的清历史能力。
+            match store.delete_conversation_entry(&workspace_id, conversation_id)? {
+                crate::store::ConversationEntryRemoval::Deleted(conv) => Ok(format!(
+                    "已删除对话 {}（{}；聊天历史保留）",
+                    conv.id, conv.name
+                )),
+                crate::store::ConversationEntryRemoval::AlreadyAbsent => Err(format!(
                     "工作区 {workspace_id} 不存在对话 {conversation_id}"
+                )),
+                crate::store::ConversationEntryRemoval::RefusedLastConversation(_) => Err(format!(
+                    "工作区 {workspace_id} 的最后一条对话不能删除（每个工作区至少保留一条；聊天历史保留）"
                 )),
             }
         }

@@ -9,6 +9,13 @@
 //! 3. **事件**：宿主侧发布（`emit`）变成模块发**模块事件**（见 `lib.rs` 的
 //!    协议说明），由宿主翻译成 `BackendEvent` 与会话子系统动作。
 //!
+//! 另有 2 条**模块私有方法**（[`OVERVIEW`] / [`DELETE_CONVERSATION`]）：不走
+//! 宿主 `BackendCommand` 词汇表，面板经通用调用通道
+//! `InvokeModuleOp { module, method, payload }` 点名调用，结果作为
+//! `ModuleInvokeResult.data` 原样返回——宿主只搬运，不认识 `workspaces` /
+//! `conversations` 这些字段。删除默认走 [`DELETE_CONVERSATION`]（只删入口、
+//! 保留历史），宿主协议不新增变体。
+//!
 //! `team_id` 语义仍是**必填**（去主智能体后没有默认人格），缺失即报错。
 
 use std::collections::HashMap;
@@ -18,6 +25,7 @@ use serde_json::{json, Value};
 
 use crate::files;
 use crate::git::collect_dir_git;
+use crate::store::{ConversationEntryRemoval, WorkspaceStore};
 use crate::wire::{
     BrowseRoot, WorkspaceDirectory, WorkspaceFileEntry, WorkspaceGitInfo, WorkspaceSessionInfo,
 };
@@ -25,10 +33,12 @@ use crate::ModuleState;
 
 /// 本模块处理的命令（`Contribution::Command` 的 `name`）。
 ///
-/// 前 7 条是**面板线协议命令**；后 2 条是**宿主内部命令**（面板不发它们）：
+/// 前 7 条是**面板线协议命令**；接着 2 条是**宿主内部命令**（面板不发它们）：
 /// 宿主原本直接调 store 的两个动作（会话级 API 覆盖的持久化、供应商改名传播）
-/// 现在跨了仓库边界，只能经命令通道回来。
-pub const COMMANDS: [&str; 9] = [
+/// 现在跨了仓库边界，只能经命令通道回来。最后 2 条是**模块私有方法**
+/// （[`OVERVIEW`] / [`DELETE_CONVERSATION`]）：面板经通用调用通道点名调用，
+/// 宿主协议不新增变体。
+pub const COMMANDS: [&str; 11] = [
     REQUEST_SESSIONS,
     SAVE_SESSION,
     DELETE_SESSION,
@@ -39,6 +49,9 @@ pub const COMMANDS: [&str; 9] = [
     // ── 宿主内部命令（见模块文档）──
     SET_CONVERSATION_API_PROFILE,
     RENAME_API_PROFILE,
+    // ── 模块私有方法（通用调用通道 `InvokeModuleOp`）──
+    OVERVIEW,
+    DELETE_CONVERSATION,
 ];
 
 // 每个命令名单独具名导出：宿主（Core）要按名字分发其中两条内部命令，
@@ -62,6 +75,20 @@ pub const REQUEST_BROWSE_DIRECTORIES: &str = "RequestBrowseDirectories";
 pub const SET_CONVERSATION_API_PROFILE: &str = "WorkspaceSetConversationApiProfile";
 /// 宿主内部：供应商改名向各会话的覆盖值传播。
 pub const RENAME_API_PROFILE: &str = "WorkspaceRenameApiProfile";
+/// **模块私有只读方法**：工作区概览（工作区数 / 对话数 / 目录数）。
+///
+/// 点分小写 = 模块自己的词汇。面板经 `InvokeModuleOp.method` 点名调用，
+/// 宿主不认识它，也不需要在 `BackendCommand` 里加变体或特判模块 id。
+pub const OVERVIEW: &str = "workspace.overview";
+
+/// **模块私有写方法**：删除一条对话**入口**（保留其聊天历史）。
+///
+/// 与 [`OVERVIEW`] 同一条通用调用通道（`InvokeModuleOp` → `ModuleInvokeResult`），
+/// 宿主协议不新增变体。语义全部由
+/// [`WorkspaceStore::delete_conversation_entry`](crate::store::WorkspaceStore::delete_conversation_entry)
+/// 承担：只删入口（**不发**历史清理钩子）、幂等、落盘成功才提交、拒绝最后一条、
+/// 通道身份退役。
+pub const DELETE_CONVERSATION: &str = "workspace.deleteConversation";
 
 /// `workspace` 工具的调用入口名（宿主把工具调用转发到这里）。
 ///
@@ -103,6 +130,11 @@ pub async fn handle(
             set_conversation_api_profile(state, team_id.as_deref(), &payload)
         }
         "WorkspaceRenameApiProfile" => rename_api_profile(state, team_id.as_deref(), &payload),
+        // 模块私有方法：**不经** `team_id` 的 Option 归一化，缺/空要给出
+        // 与宿主内部命令相同的明确错误（没有默认人格）。
+        other if other == OVERVIEW => overview(state, &payload),
+        // 模块私有写方法：与概览同一条通道，但**会**改工作区文档（只删入口）。
+        other if other == DELETE_CONVERSATION => delete_conversation_entry(state, &payload),
         other => {
             return Some(Err(format!("命令 {other} 被声明但处理器没有认领它")));
         }
@@ -240,6 +272,146 @@ fn rename_api_profile(
     let store = store_or_err(state, team_id)?;
     let changed = store.rename_api_profile(from, to)?;
     Ok(json!({ "changed": changed }))
+}
+
+/// 工作区概览（模块私有只读方法 [`OVERVIEW`]）。
+///
+/// 这是「模块私有操作」的样板：宿主协议里**没有**对应变体，宿主也**不认识**
+/// 返回字段。面板发
+/// `{"InvokeModuleOp":{"module":"echo-agent.workspace","method":"workspace.overview","payload":{…}}}`
+/// ——Core 按 `module` 找到本模块、按 `method` 走通用命令分发，把 `Ok` / `Err`
+/// 包成 `ModuleInvokeResult`；模块只负责语义。
+///
+/// ## 语义（低风险的来源）
+///
+/// - `team_id` **必填**（缺失 / 空串 → `Err`，绝不回落到默认人格）；
+/// - **只读一次** [`WorkspaceStore::snapshot`]：工作区、对话、目录计数与
+///   `active` 全部来自同一份内存快照，不会出现"计数含新工作区、active 还是
+///   旧的"这种跨读拼接；
+/// - **不扫文件系统**：不跑 git、不列目录、不做 canonicalize；远程目录只按
+///   声明计数（`remote_directories`），不发起联邦查询；
+/// - **不写盘、不改历史**：新 team 的 store 只读已有文档（缺失 = 空文档），
+///   落盘只发生在后续变更命令；概览不会物化惰性主对话；
+/// - `request_id` 原样回显（若提供）：`ModuleInvokeResult` 只回显
+///   `module` / `method`，并发调用的请求级配对只能靠模块把调用方 id 带回。
+///   非字符串的 `request_id` 明确报错，不做静默丢弃（调用方会永远等）。
+fn overview(state: &ModuleState, payload: &Value) -> Result<Value, String> {
+    let team_id = payload
+        .get("team_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("{OVERVIEW} 必须指定 team_id（没有默认智能体）"))?;
+    let request_id = match payload.get("request_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) if id.is_empty() => None,
+        Some(Value::String(id)) => Some(id.as_str()),
+        Some(_) => return Err(format!("{OVERVIEW} 的 request_id 必须是字符串")),
+    };
+    let store = state.store(team_id);
+    // 单次快照：下面所有派生量都只读这一份，不再二次读 store。
+    let (sessions, active) = store.snapshot();
+    let mut conversations = 0usize;
+    let mut directories = 0usize;
+    let mut remote_directories = 0usize;
+    for session in &sessions {
+        // 对话计数用**读视图**：空列表 = 存量主对话（`legacy: true`），
+        // 与面板/宿主看到的对话数一致（`conversations_view` 是唯一规则）。
+        conversations += crate::store::conversations_view(session).len();
+        directories += session.directories.len();
+        remote_directories += session
+            .directories
+            .iter()
+            .filter(|directory| directory.is_remote())
+            .count();
+    }
+    let mut out = json!({
+        "team_id": team_id,
+        "workspaces": sessions.len(),
+        "conversations": conversations,
+        "directories": directories,
+        "remote_directories": remote_directories,
+        "active": active,
+    });
+    if let Some(request_id) = request_id {
+        out["request_id"] = json!(request_id);
+    }
+    Ok(out)
+}
+
+/// 删除对话入口（模块私有写方法 [`DELETE_CONVERSATION`]）。
+///
+/// 与 [`OVERVIEW`] 同一条通用调用通道（`InvokeModuleOp` → `ModuleInvokeResult`），
+/// 宿主协议不新增 `BackendCommand` 变体。语义由
+/// [`WorkspaceStore::delete_conversation_entry`](crate::store::WorkspaceStore::delete_conversation_entry) 承担：
+///
+/// - **只删入口**：不发 `workspace.conversation_deleted`（宿主的历史清理钩子），
+///   聊天历史原样保留；
+/// - **幂等**：目标已不在 → `result: "already_absent"`（`Ok`，不是错误）；
+/// - **拒绝最后一条** → `result: "refused_last_conversation"` + `message`
+///   （仍是 `Ok`：这是业务结果，面板要能按 `request_id` 配对并给明确提示；
+///   传输出错才是 `Err`）；
+/// - **落盘失败 / 工作区不存在** → `Err`（`ModuleInvokeResult.ok = false`，
+///   内存与磁盘都没变）。
+///
+/// 不在这里发 `Error` 后端事件：通用调用通道的失败已由
+/// `ModuleInvokeResult.error` 承载，再发一条会让面板同时弹 toast + 显示失败。
+/// `request_id` 原样回显：`ModuleInvokeResult` 只回显 `module` / `method`，
+/// 面板并发删除时只能靠它把回包配到请求上。
+fn delete_conversation_entry(state: &ModuleState, payload: &Value) -> Result<Value, String> {
+    let team_id = payload
+        .get("team_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("{DELETE_CONVERSATION} 必须指定 team_id（没有默认智能体）"))?;
+    let request_id = match payload.get("request_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) if id.is_empty() => None,
+        Some(Value::String(id)) => Some(id.as_str()),
+        Some(_) => return Err(format!("{DELETE_CONVERSATION} 的 request_id 必须是字符串")),
+    };
+    let workspace_id = payload
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("{DELETE_CONVERSATION} 缺少 workspace_id"))?;
+    let conversation_id = payload
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("{DELETE_CONVERSATION} 缺少 conversation_id"))?;
+
+    let store = state.store(team_id);
+    let (result, conversation, message) =
+        match store.delete_conversation_entry(workspace_id, conversation_id)? {
+            ConversationEntryRemoval::Deleted(conv) => {
+                let message = format!("已删除对话「{}」的入口（聊天历史保留）", conv.name);
+                ("deleted", Some(conv), message)
+            }
+            ConversationEntryRemoval::AlreadyAbsent => (
+                "already_absent",
+                None,
+                "该对话已不在列表中（可能已在其他窗口删除）".to_string(),
+            ),
+            ConversationEntryRemoval::RefusedLastConversation(conv) => {
+                let message = format!(
+                "「{}」是该工作区的最后一条对话，不能删除：每个工作区至少保留一条（聊天历史保留）",
+                conv.name
+            );
+                ("refused_last_conversation", Some(conv), message)
+            }
+        };
+    let mut out = json!({
+        "team_id": team_id,
+        "workspace_id": workspace_id,
+        "conversation_id": conversation_id,
+        "result": result,
+        "conversation": conversation,
+        "message": message,
+    });
+    if let Some(request_id) = request_id {
+        out["request_id"] = json!(request_id);
+    }
+    Ok(out)
 }
 
 /// 变更类命令的公共骨架：取 store → 执行 → 回执。
@@ -1023,6 +1195,8 @@ mod command_name_tests {
             REQUEST_BROWSE_DIRECTORIES,
             SET_CONVERSATION_API_PROFILE,
             RENAME_API_PROFILE,
+            OVERVIEW,
+            DELETE_CONVERSATION,
         ];
         assert_eq!(COMMANDS, expected);
     }

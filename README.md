@@ -50,7 +50,7 @@
    |---|---|---|
    | `workspace.backend_event` | 一个 `BackendEvent` 的 JSON（如 `{"WorkspaceSessions":{…}}`） | 反序列化后 `agent.emit(...)` 发给面板 |
    | `workspace.changed` | `{team_id, active, active_conversation, sessions}` | active 存在时确保工作区会话通道已注册（会话名 = 工作区名 + 对话名）、推 `SessionUpdated`、广播 `WorkspaceSessions` |
-   | `workspace.conversation_deleted` | `{team_id, workspace_id, conversation}` | 清空该对话的通道历史（事件日志 / 投影 / 时间线） |
+   | `workspace.conversation_deleted` | `{team_id, workspace_id, conversation}` | 清空该对话的通道历史（事件日志 / 投影 / 时间线）。C3b 起默认删除**不发**它（只删入口、历史保留），仅旧入口 `delete_conversation` 触发 |
 
 5. **注册工具**：用 `agent_module_workspace::tool::{TOOL_NAME, description(),
    parameters()}` 建一个转发型 `Tool`，`execute` 时把参数 + `team_id` 交给

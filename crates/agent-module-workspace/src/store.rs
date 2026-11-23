@@ -6,6 +6,21 @@
 //!
 //! 与 Core 版本的区别只有一处：不再依赖 `echo-protocol` 的类型，改用
 //! [`crate::wire`] 的线镜像（见该模块文档：包级循环依赖所致）。
+//!
+//! # 删除契约（C3a）
+//!
+//! 两条删除路径**语义不同，不可混用**：
+//!
+//! - [`WorkspaceStore::delete_conversation`]：旧路径（工具在用），删除后触发
+//!   [`ConversationDeleteHook`] 让宿主清空该对话的通道历史；
+//! - [`WorkspaceStore::delete_conversation_entry`]：只删入口、**不发**历史清理
+//!   钩子、幂等、落盘成功才提交、拒绝删最后一条，并把被删通道记入
+//!   持久化元数据 `retired_channels`，防止新对话复用其身份。
+//!
+//! 面板全量保存（[`WorkspaceStore::upsert`]）保留旧语义（`[]` = 未提供，整表
+//! 替换由调用方负责），但把**退役通道的最终判定**收进自己的写锁（C3d）：命令层
+//! 的独立读锁检查在「检查 → upsert」之间有并发删除窗口，工具直接调用也会绕过；
+//! 规则见 [`WorkspaceStore::upsert`] 的方法文档。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -26,6 +41,34 @@ pub(crate) struct WorkspaceDocument {
     pub(crate) active_conversation: Option<String>,
     #[serde(default)]
     pub(crate) sessions: Vec<WorkspaceSessionInfo>,
+    /// 已退役的**对话通道身份**：键 = 工作区 id，值 = [`channel_scope_id`] 列表。
+    ///
+    /// 为什么需要（C3a 删除契约）：对话通道的 scope 由 `(ws, conv)` 派生——
+    /// 存量裸通道 = 裸 `ws`，其余 = `<ws>/<conv>`。对话入口被删除但**历史保留**
+    /// 时，若允许新对话重新占用同一 id / 同一裸通道，新对话就会落进被删对话的
+    /// 历史里（宿主事件日志 append-only，无法区分两条对话）。因此删除入口时把
+    /// 通道记在这里，自动生成 id 时跳过它们（见 [`WorkspaceStore::upsert_conversation`]）。
+    ///
+    /// 兼容性：`serde(default)` + 空表不落键 —— 旧档没有这个键也能读；旧读者
+    /// 读到它只是忽略（没有 `deny_unknown_fields`）。回滚最多失去"防复用"这层
+    /// 保护，不丢任何会话数据（**不是**不可回滚迁移）。
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub(crate) retired_channels: HashMap<String, Vec<String>>,
+}
+
+/// 「只删对话入口」的结果（[`WorkspaceStore::delete_conversation_entry`]）。
+///
+/// 三种结果都是**业务结果**而非错误：`AlreadyAbsent` 是幂等命中的正常形态，
+/// `RefusedLastConversation` 是需要上层翻译成用户提示的策略性拒绝。只有
+/// 「工作区不存在」与「落盘失败」才走 `Err`。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConversationEntryRemoval {
+    /// 已删除并落盘（内存只在落盘成功后替换）。
+    Deleted(WorkspaceConversationInfo),
+    /// 目标对话本来就不在（重复调用 / 陈旧 id）：不写盘、不通知、不发钩子。
+    AlreadyAbsent,
+    /// 拒绝：这是该工作区最后一条对话（删掉无法在旧 JSON 里表达，见方法文档）。
+    RefusedLastConversation(WorkspaceConversationInfo),
 }
 
 /// 变更通知钩子：store 每次成功变更（新建/重命名/删除/激活）后触发一次。
@@ -204,6 +247,29 @@ impl WorkspaceStore {
     /// Insert or update a session (upsert by id). Empty id → slugified name
     /// (deduplicated with a numeric suffix). Validation errors are returned
     /// as user-facing strings.
+    ///
+    /// # 退役通道原子防护（C3d）
+    ///
+    /// 全量保存会用面板快照**整表替换** `conversations`：陈旧快照（删除后还没
+    /// 收到 `WorkspaceSessions` 广播）会把已退役通道的对话写回来，新消息就落进
+    /// 被删对话的历史里。这条判定必须在**本方法自己的写锁内、落盘与替换内存
+    /// 之前**完成——命令层的独立读锁检查在释放后到 `upsert` 之间有并发删除
+    /// 窗口，工具直接调用 `upsert` 也会绕过。
+    ///
+    /// 规则：
+    ///
+    /// - 空 id 自动生成时跳过**拥有退役记录的旧工作区 id**（哪怕该工作区已被
+    ///   整条删除、只剩 `retired_channels` 键）：新工作区不继承旧身份；
+    /// - 对**最终**对话列表逐条按 [`channel_scope_id`] 判定：通道已退役且当前
+    ///   没有「同 id 同通道」的存活条目 → 整条保存拒绝。`conversations: []`
+    ///   仍按「未提供」继承既有列表，新建工作区按读取视图补位 legacy 主对话，
+    ///   所以判定看到的就是读取侧真正会用的通道集合；
+    /// - 「同 id 同通道仍存活」必须放行：历史遗留档可能有多条 legacy 对话共用
+    ///   裸通道，删掉其中一条后裸通道退役，另一条仍活着——这是继续使用，不是
+    ///   复活；
+    /// - 显式指定 id 时，若最终列表会恢复**已退役的裸通道**（新建工作区的
+    ///   `conversations: []` 正是这种情况），同样拒绝；
+    /// - 落盘成功后才替换内存：写入失败时内存与磁盘都不变（候选文档副本）。
     pub fn upsert(
         &self,
         mut session: WorkspaceSessionInfo,
@@ -255,17 +321,22 @@ impl WorkspaceStore {
 
         let result = {
             let mut doc = self.doc.write().unwrap_or_else(|e| e.into_inner());
+            // 候选文档：id 生成 / 元数据继承 / 退役判定都在副本上做。落盘成功后
+            // 才替换内存——失败不会留下「内存已改、磁盘没改」的分叉。
+            let mut candidate = doc.clone();
             if session.id.trim().is_empty() {
                 let base = slugify(&session.name);
-                let mut candidate = base.clone();
+                let mut candidate_id = base.clone();
                 let mut n = 2;
-                while doc.sessions.iter().any(|s| s.id == candidate) {
-                    candidate = format!("{base}-{n}");
+                while candidate.sessions.iter().any(|s| s.id == candidate_id)
+                    || has_retired_records(&candidate, &candidate_id)
+                {
+                    candidate_id = format!("{base}-{n}");
                     n += 1;
                 }
-                session.id = candidate;
+                session.id = candidate_id;
             }
-            match doc.sessions.iter_mut().find(|s| s.id == session.id) {
+            match candidate.sessions.iter_mut().find(|s| s.id == session.id) {
                 Some(existing) => {
                     // 元数据编辑防护：面板编辑名称/目录时可能不携带
                     // conversations / last_conversation（协议 serde(default)
@@ -280,11 +351,13 @@ impl WorkspaceStore {
                     }
                     *existing = session.clone();
                 }
-                None => doc.sessions.push(session.clone()),
+                None => candidate.sessions.push(session.clone()),
             }
-            let result = session;
-            self.save_locked(&doc)?;
-            result
+            // 最终判定：同一把写锁内、落盘之前、内存替换之前。
+            reject_retired_channels_locked(&doc, &candidate, &session)?;
+            self.save_locked(&candidate)?;
+            *doc = candidate;
+            session
         };
         self.notify_change();
         Ok(result)
@@ -389,6 +462,11 @@ impl WorkspaceStore {
 
     /// 新建/重命名一条对话（`conv.id` 空 = 依名称生成 slug，工作区内去重；
     /// 既有 id = 重命名，`legacy` 以既有条目为准——不可由输入伪造）。
+    ///
+    /// 防复用（C3a）：新对话的 id 与通道不会落在
+    /// 持久化元数据 `retired_channels` 里——被删对话的通道历史仍在，
+    /// 新对话若占用同一通道就会"继承"旧消息。存量裸通道退役后，新对话一律
+    /// 走 `<ws>/<conv>` 格式。
     pub fn upsert_conversation(
         &self,
         ws_id: &str,
@@ -400,6 +478,9 @@ impl WorkspaceStore {
         }
         let result = {
             let mut doc = self.doc.write().unwrap_or_else(|e| e.into_inner());
+            // 先取退役列表（克隆一次）：随后 `doc.sessions` 的可变借用会挡住
+            // 对 `doc.retired_channels` 的读取。
+            let retired = doc.retired_channels.get(ws_id).cloned().unwrap_or_default();
             let Some(session) = doc.sessions.iter_mut().find(|s| s.id == ws_id) else {
                 return Err(format!("工作区会话 {ws_id} 不存在"));
             };
@@ -414,17 +495,31 @@ impl WorkspaceStore {
                         let base = slugify_conv(&conv.name);
                         let mut candidate = base.clone();
                         let mut n = 2;
-                        while session.conversations.iter().any(|c| c.id == candidate) {
+                        while session.conversations.iter().any(|c| c.id == candidate)
+                            || retired
+                                .iter()
+                                .any(|ch| ch == &format!("{ws_id}/{candidate}"))
+                        {
                             candidate = format!("{base}-{n}");
                             n += 1;
                         }
                         conv.id = candidate;
                     } else if session.conversations.iter().any(|c| c.id == conv.id) {
                         return Err(format!("对话 id {} 已存在", conv.id));
+                    } else if retired
+                        .iter()
+                        .any(|ch| ch == &format!("{ws_id}/{}", conv.id))
+                    {
+                        return Err(format!(
+                            "对话 id {} 的通道属于已删除的对话，不能复用（其历史仍在）",
+                            conv.id
+                        ));
                     }
                     // 存量裸通道 id（legacy）每工作区至多一条：列表中已有
-                    // legacy 对话时新对话一律走 `<ws>/<conv>` 格式。
-                    conv.legacy = !session.conversations.iter().any(|c| c.legacy);
+                    // legacy 对话时新对话一律走 `<ws>/<conv>` 格式；裸通道一旦被
+                    // 删除退役，同样不得再分配（否则新对话落进被删对话的历史）。
+                    conv.legacy = !session.conversations.iter().any(|c| c.legacy)
+                        && !retired.iter().any(|ch| ch == ws_id);
                     session.conversations.push(conv.clone());
                 }
             }
@@ -512,6 +607,84 @@ impl WorkspaceStore {
             None => convs.into_iter().find(|c| c.legacy)?,
         };
         Some(crate::prompt::render_prompt_text(&session, &conv))
+    }
+    /// **只删除对话入口**：移除列表里的这一条，不触发 [`ConversationDeleteHook`]
+    /// （宿主的历史清理钩子），因此被删对话的通道历史保持不变。
+    ///
+    /// 这是 C3 删除契约的存储层入口（C3b 才接线到命令/工具）。契约：
+    ///
+    /// - **幂等**：目标不存在（重复调用 / 陈旧 id）→
+    ///   [`ConversationEntryRemoval::AlreadyAbsent`]，不写盘、不通知、不发钩子；
+    /// - **只删入口**：不发历史清理钩子，也不新增任何"清历史"能力；
+    /// - **落盘成功才提交**：先在文档副本上改完并原子落盘，成功后才替换内存并
+    ///   触发 [`ChangeHook`]；失败时内存与磁盘都不变（旧实现先改内存再落盘，
+    ///   失败会分叉）；
+    /// - **拒绝最后一条**：返回 [`ConversationEntryRemoval::RefusedLastConversation`]，
+    ///   不写盘。现有 JSON 用"`conversations` 缺省/空"表示"惰性补位存量主对话"，
+    ///   空列表**无法**表达"一条都不剩"：删掉最后一条会让读取视图把
+    ///   `{id:"main", legacy:true}` 补回来，新入口会复用刚删对话的通道身份。
+    ///   在引入可表达的墓碑表示之前，宁可明确拒绝（后续决策见
+    ///   持久化元数据 `retired_channels`——通道退役已实现，但"最后一条"
+    ///   仍缺一个"本工作区已无对话"的持久化表示）。
+    /// - **通道退役**：被删对话的通道（[`channel_scope_id`]）记入
+    ///   `retired_channels`，与删除同一次落盘；之后 `upsert_conversation`
+    ///   不会把同一通道再分配给新对话。
+    pub fn delete_conversation_entry(
+        &self,
+        ws_id: &str,
+        conv_id: &str,
+    ) -> Result<ConversationEntryRemoval, String> {
+        let mut doc = self.doc.write().unwrap_or_else(|e| e.into_inner());
+        let Some(session) = doc.sessions.iter().find(|s| s.id == ws_id) else {
+            return Err(format!("工作区会话 {ws_id} 不存在"));
+        };
+        // 以**读取视图**（含存量主对话惰性补位）为准判断目标是否存在/是否最后一条，
+        // 但不存在时绝不物化——no-op 不产生任何写入。
+        let view = conversations_view(session);
+        let Some(conv) = view.iter().find(|c| c.id == conv_id).cloned() else {
+            return Ok(ConversationEntryRemoval::AlreadyAbsent);
+        };
+        if view.len() <= 1 {
+            return Ok(ConversationEntryRemoval::RefusedLastConversation(conv));
+        }
+
+        // 候选文档：全部改完再落盘；`?` 提前返回时内存里的 `doc` 原样未动。
+        let mut candidate = doc.clone();
+        let Some(session) = candidate.sessions.iter_mut().find(|s| s.id == ws_id) else {
+            return Err(format!("工作区会话 {ws_id} 不存在"));
+        };
+        session.conversations.retain(|c| c.id != conv_id);
+        if session.last_conversation.as_deref() == Some(conv_id) {
+            session.last_conversation = session.conversations.first().map(|c| c.id.clone());
+        }
+        let fallback = session.conversations.first().map(|c| c.id.clone());
+        if candidate.active.as_deref() == Some(ws_id)
+            && candidate.active_conversation.as_deref() == Some(conv_id)
+        {
+            candidate.active_conversation = fallback;
+        }
+        // 通道退役与删除同一次落盘：不会出现"删了但没退役"的中间态。
+        let channel = channel_scope_id(ws_id, &conv);
+        let retired = candidate
+            .retired_channels
+            .entry(ws_id.to_string())
+            .or_default();
+        if !retired.iter().any(|ch| ch == &channel) {
+            retired.push(channel);
+        }
+        self.save_locked(&candidate)?;
+        // 落盘成功：此刻才替换内存（读命令立刻看到新列表）。
+        *doc = candidate;
+        drop(doc);
+        self.notify_change();
+        Ok(ConversationEntryRemoval::Deleted(conv))
+    }
+
+    /// 某工作区已退役的对话通道（只读诊断；见
+    /// 持久化文档的 `retired_channels`）。
+    pub fn retired_channels_of(&self, ws_id: &str) -> Vec<String> {
+        let doc = self.doc.read().unwrap_or_else(|e| e.into_inner());
+        doc.retired_channels.get(ws_id).cloned().unwrap_or_default()
     }
 
     /// API profile 改名传播：把全部工作区对话里 `api_profile == from` 的引用
@@ -605,9 +778,16 @@ impl WorkspaceStore {
                 .map_err(|e| format!("创建 {} 失败: {e}", parent.display()))?;
         }
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, raw.as_bytes())
-            .map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {e}", path.display()))?;
+        if let Err(error) = std::fs::write(&tmp, raw.as_bytes()) {
+            // 失败不留半成品：调用方据"磁盘没变"回滚，残留 tmp 会误导下一次写入。
+            // 清理失败不改变错误信息（写入/替换本身才是用户要看的）。
+            std::fs::remove_file(&tmp).ok();
+            return Err(format!("写入 {} 失败: {error}", tmp.display()));
+        }
+        std::fs::rename(&tmp, path).map_err(|e| {
+            std::fs::remove_file(&tmp).ok();
+            format!("替换 {} 失败: {e}", path.display())
+        })?;
         Ok(())
     }
 }
@@ -654,6 +834,73 @@ pub fn conversations_view(session: &WorkspaceSessionInfo) -> Vec<WorkspaceConver
 fn materialize_conversations(session: &mut WorkspaceSessionInfo) {
     if session.conversations.is_empty() {
         session.conversations = conversations_view(session);
+    }
+}
+
+/// 某工作区 id 是否**拥有退役通道记录**（只认非空列表；空表视为无记录）。
+///
+/// 用于自动 id 生成：被整条删除的工作区不会留在 `sessions` 里，但它的
+/// `retired_channels` 键仍在——新工作区若复用这个 id，就可能继承旧身份。
+fn has_retired_records(doc: &WorkspaceDocument, ws_id: &str) -> bool {
+    doc.retired_channels
+        .get(ws_id)
+        .is_some_and(|channels| !channels.is_empty())
+}
+
+/// `upsert` 写锁内的**最终**退役通道判定（C3d）。
+///
+/// - `before`：保存前的文档（取「当前仍存活」的对话身份）；
+/// - `after`：候选文档（提供 `retired_channels`；本次保存不会改它）；
+/// - `saved`：本次保存的最终会话（`conversations: []` 已按「未提供」继承）。
+///
+/// 命中 = 某条对话的通道在 `retired_channels[ws]` 里，且 `before` 中**没有**
+/// 同 id 同通道的存活条目。后者是历史遗留档的合法形态（多条 legacy 共用裸
+/// 通道，删一条后另一条仍活着），是继续使用而不是复活，必须放行。
+///
+/// 用**读取视图**取最终对话集合：新建工作区 `conversations: []` 在读取侧就是
+/// 一条 legacy 主对话（裸通道），显式重用「裸通道已退役」的旧 id 时必须在这里
+/// 被拦住，不能因为落盘列表为空就漏判。
+fn reject_retired_channels_locked(
+    before: &WorkspaceDocument,
+    after: &WorkspaceDocument,
+    saved: &WorkspaceSessionInfo,
+) -> Result<(), String> {
+    let Some(retired) = after.retired_channels.get(&saved.id) else {
+        return Ok(());
+    };
+    if retired.is_empty() {
+        return Ok(());
+    }
+    let live: Vec<(String, String)> = before
+        .sessions
+        .iter()
+        .find(|s| s.id == saved.id)
+        .map(|current| {
+            conversations_view(current)
+                .into_iter()
+                .map(|conv| {
+                    let channel = channel_scope_id(&saved.id, &conv);
+                    (conv.id, channel)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let revived = conversations_view(saved).into_iter().find(|conv| {
+        let channel = channel_scope_id(&saved.id, conv);
+        retired.iter().any(|item| item == &channel)
+            && !live
+                .iter()
+                .any(|(id, live_channel)| id == &conv.id && live_channel == &channel)
+    });
+    match revived {
+        None => Ok(()),
+        Some(conv) => Err(format!(
+            "工作区 {} 的对话「{}」({}) 通道已随删除退役，其历史仍保留，不能复用该身份；\
+             请刷新工作区列表后重试（本次保存未生效）",
+            saved.id,
+            conv.name,
+            channel_scope_id(&saved.id, &conv)
+        )),
     }
 }
 
