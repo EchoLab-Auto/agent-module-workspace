@@ -186,3 +186,124 @@ describe('WorkspacePanel 工作区会话', () => {
     wrapper.unmount();
   });
 });
+
+describe('WorkspacePanel JSON 导入 / 编辑（2026-11）', () => {
+  beforeEach(() => {
+    vi.mocked(sendCommand).mockClear();
+    state.activeRegion = null;
+    seed([]);
+  });
+
+  it('新建：粘贴 JSON 后直接点保存，自动应用并带上 conversations', async () => {
+    // 背景：表单只有名称/描述/目录，落盘字段还有 conversations（含 api_profile）
+    // 与 last_conversation。没有自动应用这一步，"贴了 JSON 直接点保存"会静默
+    // 丢掉 JSON 里的内容——最容易踩的坑。
+    const wrapper = mount(WorkspacePanel, { props: { teamId: 'EchoCode' } });
+    await nextTick();
+    vi.mocked(sendCommand).mockClear();
+    const newBtn = wrapper.findAll('button').find((b) => b.text() === '新建');
+    await newBtn!.trigger('click');
+    await nextTick();
+    const saveBtn = wrapper.findAll('button').find((b) => b.text() === '保存');
+    // 空表单（名称也空、JSON 也空）：不可保存
+    expect(saveBtn!.attributes('disabled')).toBe('');
+
+    await wrapper.find('.ws-json__input').setValue(JSON.stringify({
+      name: '框架',
+      directories: ['/srv/core', { path: '/srv/remote', node: 'gpu-box' }],
+      conversations: [
+        { id: 'main', name: '主对话', legacy: true },
+        { id: 'review', name: '评审', api_profile: 'kimi' },
+      ],
+      last_conversation: 'review',
+    }));
+    // 名称留空（只在 JSON 里给）：贴了 JSON 就应可保存——否则"贴进去没生效"。
+    expect(saveBtn!.attributes('disabled')).toBeUndefined();
+    await saveBtn!.trigger('click');
+
+    const calls = vi.mocked(sendCommand).mock.calls.map((c) => c[0]);
+    const saves = calls.filter(
+      (c) => typeof c === 'object' && 'SaveWorkspaceSession' in (c as object),
+    ) as Array<{ SaveWorkspaceSession: { team_id: string; session: WorkspaceSessionInfo } }>;
+    expect(saves).toHaveLength(1);
+    const { session } = saves[0].SaveWorkspaceSession;
+    expect(session.name).toBe('框架');
+    expect(session.directories).toEqual(['/srv/core', { path: '/srv/remote', node: 'gpu-box' }]);
+    expect(session.conversations?.map((c) => c.id)).toEqual(['main', 'review']);
+    expect(session.conversations?.[1].api_profile).toBe('kimi');
+    expect(session.last_conversation).toBe('review');
+    wrapper.unmount();
+  });
+
+  it('新建：数组 JSON = 批量导入，逐条提交', async () => {
+    const wrapper = mount(WorkspacePanel, { props: { teamId: 'EchoCode' } });
+    await nextTick();
+    vi.mocked(sendCommand).mockClear();
+    await wrapper.findAll('button').find((b) => b.text() === '新建')!.trigger('click');
+    await nextTick();
+    await wrapper.find('.ws-json__input').setValue(JSON.stringify([
+      { id: 'core', name: '框架', directories: ['/srv/core'] },
+      { id: 'panel', name: '面板', directories: ['/srv/panel'] },
+    ]));
+    await wrapper.findAll('button').find((b) => b.text() === '保存')!.trigger('click');
+
+    const saves = vi.mocked(sendCommand).mock.calls
+      .map((c) => c[0])
+      .filter((c) => typeof c === 'object' && 'SaveWorkspaceSession' in (c as object)) as Array<{
+        SaveWorkspaceSession: { session: WorkspaceSessionInfo };
+      }>;
+    expect(saves.map((s) => s.SaveWorkspaceSession.session.id)).toEqual(['core', 'panel']);
+    // 批量导入后表单关闭、并留下中性提示（不是红色错误）
+    expect(wrapper.find('.ws-form').exists()).toBe(false);
+    expect(wrapper.find('.ws-notice').text()).toContain('2 个工作区');
+    wrapper.unmount();
+  });
+
+  it('编辑：JSON 改描述生效；试图改 id 被拒绝且不发命令', async () => {
+    seed([{
+      id: 'core',
+      name: '框架',
+      description: '旧描述',
+      directories: ['/srv/core'],
+      conversations: [{ id: 'main', name: '主对话', legacy: true }],
+    }]);
+    const wrapper = mount(WorkspacePanel, { props: { teamId: 'EchoCode' } });
+    await nextTick();
+    await wrapper.findAll('button').find((b) => b.text() === '编辑')!.trigger('click');
+    await nextTick();
+    // 编辑段的初始文本 = 当前会话（含对话，表单里改不了这些）
+    const initial = (wrapper.find('.ws-json__input').element as HTMLTextAreaElement).value;
+    expect(initial).toContain('"main"');
+
+    vi.mocked(sendCommand).mockClear();
+    // 改 id → 拒绝
+    await wrapper.find('.ws-json__input').setValue(JSON.stringify({
+      id: 'renamed',
+      name: '框架',
+      directories: ['/srv/core'],
+    }));
+    await wrapper.findAll('button').find((b) => b.text() === '保存')!.trigger('click');
+    expect(
+      vi.mocked(sendCommand).mock.calls.some(
+        (c) => typeof c[0] === 'object' && 'SaveWorkspaceSession' in (c[0] as object),
+      ),
+    ).toBe(false);
+    expect(wrapper.find('.ws-error').text()).toContain('不能修改工作区 id');
+
+    // 只改描述 → 生效，且 id 保持原值
+    await wrapper.find('.ws-json__input').setValue(JSON.stringify({
+      name: '框架',
+      description: '新描述',
+      directories: ['/srv/core'],
+    }));
+    await wrapper.findAll('button').find((b) => b.text() === '保存')!.trigger('click');
+    const save = vi.mocked(sendCommand).mock.calls
+      .map((c) => c[0])
+      .find((c) => typeof c === 'object' && 'SaveWorkspaceSession' in (c as object)) as {
+        SaveWorkspaceSession: { session: WorkspaceSessionInfo };
+      };
+    expect(save.SaveWorkspaceSession.session.id).toBe('core');
+    expect(save.SaveWorkspaceSession.session.description).toBe('新描述');
+    wrapper.unmount();
+  });
+});

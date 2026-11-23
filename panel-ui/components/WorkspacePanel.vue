@@ -42,6 +42,7 @@ import {
   requestConversationDelete,
   retiredConversationIds,
 } from '../workspace-conversation-delete';
+import { parseWorkspaceJson, sessionToJson } from '../workspace-json';
 
 const props = defineProps<{ teamId: string | null }>();
 
@@ -124,10 +125,12 @@ const formDescription = ref('');
 const formDirs = ref('');
 const actionPending = ref<string | null>(null);
 const actionError = ref<string | null>(null);
+/** 中性提示（导入成功 / JSON 已应用）；与 `actionError` 分开是因为后者是红的。 */
+const actionNotice = ref<string | null>(null);
 let actionTimer: number | undefined;
 function beginAction(key: string): boolean {
   if (actionPending.value) return false;
-  actionPending.value = key; actionError.value = null;
+  actionPending.value = key; actionError.value = null; actionNotice.value = null;
   if (actionTimer) window.clearTimeout(actionTimer);
   actionTimer = window.setTimeout(() => {
     if (actionPending.value === key) { actionPending.value = null; actionError.value = '操作超时，请检查连接后重试；当前内容已保留。'; }
@@ -140,11 +143,38 @@ function finishAction(): void {
   actionTimer = undefined;
 }
 
+// ── JSON 导入 / 编辑（2026-11）──
+// 表单只有名称/描述/目录三样，而落盘字段还包含 conversations（每个对话的
+// api_profile / legacy）与 last_conversation。JSON 段是这条路径的入口：
+// 粘贴 → 解析（`../workspace-json`）→ 回填表单或批量提交。
+// **保存前会自动应用未应用的改动**——否则「贴了 JSON 直接点保存」会静默丢掉
+// JSON 里的内容，这是这条路径最容易踩的坑。
+const formJson = ref('');
+/** 上次生成/应用时的文本：与它不同 = 用户改过 JSON 还没应用。 */
+const jsonBaseline = ref('');
+const jsonError = ref<string | null>(null);
+const jsonNotice = ref<string | null>(null);
+/** 应用 JSON 后携带的对话（`null` = 本次不动既有对话，与表单保存语义一致）。 */
+const formConversations = ref<WorkspaceConversationInfo[] | null>(null);
+const formLastConversation = ref<string | null>(null);
+const jsonDirty = computed(() => formJson.value.trim() !== '' && formJson.value !== jsonBaseline.value);
+
+function resetJsonFeedback(): void {
+  jsonError.value = null;
+  jsonNotice.value = null;
+}
+
 function startCreate() {
   editing.value = { id: '' };
   formName.value = '';
   formDescription.value = '';
   formDirs.value = '';
+  formConversations.value = null;
+  formLastConversation.value = null;
+  formJson.value = '';
+  jsonBaseline.value = '';
+  actionNotice.value = null;
+  resetJsonFeedback();
 }
 
 function startEdit(session: WorkspaceSessionInfo) {
@@ -154,10 +184,118 @@ function startEdit(session: WorkspaceSessionInfo) {
   // 规范化：跨机目录 {path,node} → `node://<node>/<path>` 编辑串
   // （此前直接 join 会把对象变成 "[object Object]"）。
   formDirs.value = (session.directories ?? []).map(directoryToInput).join('\n');
+  // 对话不进表单（表单只有三个字段），但 JSON 段以它为初始内容。
+  formConversations.value = null;
+  formLastConversation.value = null;
+  formJson.value = sessionToJson(session);
+  jsonBaseline.value = formJson.value;
+  actionNotice.value = null;
+  resetJsonFeedback();
 }
 
 function cancelEdit() {
   editing.value = null;
+  resetJsonFeedback();
+}
+
+/** 把编辑中的会话重新生成为 JSON（丢弃文本改动）。 */
+function resetJson() {
+  const existing = editing.value ? sessions.value.find((s) => s.id === editing.value!.id) : undefined;
+  formJson.value = existing ? sessionToJson(existing) : '';
+  jsonBaseline.value = formJson.value;
+  formConversations.value = null;
+  formLastConversation.value = null;
+  resetJsonFeedback();
+}
+
+/**
+ * 解析当前 JSON 文本并回填表单。返回可提交的会话数组（失败 → null，
+ * 原因已写进 `jsonError`）。
+ *
+ * 新建：允许 1..N 份（N>1 = 批量导入，`save` 逐条发命令）。
+ * 编辑：只允许 1 份，且 id 必须与正在编辑的一致——改 id 等于「另建一份」，
+ * 会留下一条指向旧 id 的孤儿记录。
+ */
+function applyJson(): WorkspaceSessionInfo[] | null {
+  resetJsonFeedback();
+  const parsed = parseWorkspaceJson(formJson.value);
+  if (!parsed.ok) {
+    jsonError.value = parsed.error;
+    return null;
+  }
+  const editingId = editing.value?.id ?? '';
+  if (editingId) {
+    if (parsed.sessions.length !== 1) {
+      jsonError.value = `编辑时只能有一份工作区（当前 ${parsed.sessions.length} 份）`;
+      return null;
+    }
+    const only: WorkspaceSessionInfo = { ...parsed.sessions[0], id: editingId };
+    if (parsed.sessions[0].id && parsed.sessions[0].id !== editingId) {
+      jsonError.value = `编辑时不能修改工作区 id（当前「${editingId}」，JSON 里是「${parsed.sessions[0].id}」）`;
+      return null;
+    }
+    formName.value = only.name;
+    formDescription.value = only.description ?? '';
+    formDirs.value = (only.directories ?? []).map(directoryToInput).join('\n');
+    formConversations.value = only.conversations ?? null;
+    formLastConversation.value = only.last_conversation ?? null;
+    jsonBaseline.value = formJson.value;
+    jsonNotice.value = parsed.document && parsed.active
+      ? `已应用 JSON（文档里的 active「${parsed.active}」不随保存写入，激活请在列表里点）`
+      : '已应用 JSON（点「保存」生效）';
+    return [only];
+  }
+  // 新建：回填第一份，让用户看到即将创建什么。
+  const first = parsed.sessions[0];
+  formName.value = first.name;
+  formDescription.value = first.description ?? '';
+  formDirs.value = (first.directories ?? []).map(directoryToInput).join('\n');
+  formConversations.value = first.conversations ?? null;
+  formLastConversation.value = first.last_conversation ?? null;
+  jsonBaseline.value = formJson.value;
+  jsonNotice.value = parsed.sessions.length > 1
+    ? `已解析 ${parsed.sessions.length} 份工作区，保存后批量导入`
+    : '已解析 1 份工作区（点「保存」创建）';
+  return parsed.sessions;
+}
+
+function applyJsonFromButton(): void {
+  applyJson();
+}
+
+function save() {
+  if (!props.teamId || !editing.value) return;
+  const id = editing.value.id;
+  // JSON 有未应用的改动 → 先应用；失败即中止，绝不「用旧表单值静默保存」。
+  const applied = jsonDirty.value ? applyJson() : null;
+  if (jsonDirty.value && !applied) return;
+  if (!formName.value.trim() && !applied?.length) return;
+  if (!beginAction(id ? `save:${id}` : 'save:new')) return;
+  // 批量（仅新建）：JSON 里有多份 → 逐条提交。全部命令在同一 tick 发出，
+  // 无需逐条等待；Core 对每条都会广播一次 `WorkspaceSessions`。
+  if (!id && applied && applied.length > 1) {
+    for (const session of applied) {
+      sendCommand({ SaveWorkspaceSession: { team_id: props.teamId, session } });
+    }
+    finishAction();
+    editing.value = null;
+    actionNotice.value = `已提交 ${applied.length} 个工作区（逐条落盘；个别失败会单独提示）`;
+    return;
+  }
+  const existing = id ? sessions.value.find((s) => s.id === id) : undefined;
+  const session: WorkspaceSessionInfo = {
+    ...(existing ?? {}),
+    id,
+    name: (applied?.[0]?.name ?? formName.value).trim(),
+    description: (applied?.[0]?.description ?? formDescription.value).trim(),
+    directories: applied?.[0]?.directories
+      ?? formDirs.value.split('\n').map((line) => line.trim()).filter(Boolean),
+    // SaveWorkspaceSession 是**全量替换**：元数据编辑不能擦掉对话；只有 JSON
+    // 明确给了 conversations 才替换（空数组在 Core 侧同样解释为「未提供」）。
+    conversations: formConversations.value ?? existing?.conversations ?? [],
+    last_conversation: formLastConversation.value ?? existing?.last_conversation ?? null,
+  };
+  sendCommand({ SaveWorkspaceSession: { team_id: props.teamId, session } });
 }
 
 // ── 目录选择器（2026-10）：浏览本机/联邦节点目录树挑选 ──
@@ -174,24 +312,6 @@ function onPickDirectory(path: string) {
   }
   formDirs.value = lines.join('\n');
   pickerOpen.value = false;
-}
-
-function save() {
-  if (!props.teamId || !editing.value) return;
-  const id = editing.value.id;
-  if (!formName.value.trim() || !beginAction(id ? `save:${id}` : 'save:new')) return;
-  const existing = id ? sessions.value.find((s) => s.id === id) : undefined;
-  const session: WorkspaceSessionInfo = {
-    ...(existing ?? {}),
-    id,
-    name: formName.value.trim(),
-    description: formDescription.value.trim(),
-    directories: formDirs.value.split('\n').map((line) => line.trim()).filter(Boolean),
-    // SaveWorkspaceSession is a full replacement: never erase conversations on metadata edit.
-    conversations: existing?.conversations ?? [],
-    last_conversation: existing?.last_conversation ?? null,
-  };
-  sendCommand({ SaveWorkspaceSession: { team_id: props.teamId, session } });
 }
 
 // ── 激活 / 删除 ──
@@ -425,6 +545,7 @@ watch(
 <template>
   <div class="ws-panel">
     <p v-if="actionError" class="ws-error">{{ actionError }}</p>
+    <p v-if="actionNotice" class="ws-notice">{{ actionNotice }}</p>
     <!-- 会话管理 -->
     <section class="ws-pane--main">
       <div class="ws-head">
@@ -479,8 +600,47 @@ watch(
           placeholder="/home/evence/.local/share/echo-agent-core/source&#10;node://gpu-box/srv/remote-repo"
         />
       </label>
+      <!-- JSON 导入 / 编辑（2026-11）：表单填不了 conversations / api_profile /
+           last_conversation；迁移或复制既有工作区时用户手上正好是一段落盘
+           JSON，这里直接接收（三种形态见 `../workspace-json`）。
+           默认折叠：日常建一个工作区只用上面三个字段，不该被 20 行 JSON 干扰。 -->
+      <details class="ws-json">
+        <summary class="ws-json__summary">
+          JSON（导入 / 编辑）
+          <span v-if="jsonDirty" class="ws-json__dirty">· 有未应用的修改</span>
+        </summary>
+        <p class="ws-json__hint">
+          可粘贴单份工作区、会话数组，或整份文档 <code>{ "sessions": [ … ] }</code>；
+          <code>directories</code> 里的 <code>{ "path": …, "node": … }</code> 是跨机目录。
+          改完点「应用 JSON」，或直接保存（保存前会自动应用）。
+        </p>
+        <textarea
+          v-model="formJson"
+          class="ws-textarea ws-json__input"
+          rows="10"
+          spellcheck="false"
+          placeholder='{&#10;  "name": "示例工作区",&#10;  "directories": ["/srv/repo"],&#10;  "conversations": [{ "id": "main", "name": "主对话", "legacy": true }]&#10;}'
+        />
+        <div class="ws-json__actions">
+          <NeumorphismButton size="small" variant="glass" :disabled="!formJson.trim()" @click="applyJsonFromButton">
+            应用 JSON
+          </NeumorphismButton>
+          <NeumorphismButton v-if="editing.id" size="small" variant="glass" @click="resetJson">
+            重置
+          </NeumorphismButton>
+        </div>
+        <p v-if="jsonError" class="ws-error ws-json__msg">{{ jsonError }}</p>
+        <p v-else-if="jsonNotice" class="ws-notice ws-json__msg">{{ jsonNotice }}</p>
+      </details>
       <div class="ws-form__actions">
-        <NeumorphismButton size="small" variant="glass" :disabled="!formName.trim() || !!actionPending" @click="save">
+        <!-- 贴了 JSON 但没点「应用」时表单名称可能还是空的：脏 JSON 也算可保存，
+             否则按钮禁用会让人以为「贴进去没生效」。 -->
+        <NeumorphismButton
+          size="small"
+          variant="glass"
+          :disabled="(!formName.trim() && !jsonDirty) || !!actionPending"
+          @click="save"
+        >
           {{ actionPending?.startsWith('save:') ? '保存中…' : '保存' }}
         </NeumorphismButton>
         <NeumorphismButton size="small" variant="glass" @click="cancelEdit">取消</NeumorphismButton>
@@ -815,4 +975,35 @@ watch(
 
 .ws-empty { margin: 0; font-size: 12px; }
 .ws-error { margin: 4px 0; color: var(--panel-err, #d9534f); font-size: 12px; }
+.ws-notice { margin: 4px 0; color: var(--nm-text-secondary); font-size: 12px; }
+.ws-notice::before { content: '· '; }
+
+/* JSON 导入 / 编辑段：折叠态只占一行，展开后自己滚（不把面板整体撑高）。 */
+.ws-json {
+  padding-top: 6px;
+  border-top: 1px dashed var(--nm-border-color);
+}
+.ws-json__summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--nm-text-secondary);
+  user-select: none;
+}
+.ws-json__dirty { color: var(--panel-warn, #b8860b); }
+.ws-json__hint {
+  margin: 4px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--nm-text-placeholder);
+}
+.ws-json__input {
+  width: 100%;
+  min-height: 160px;
+  max-height: 45vh;
+  font-size: 11px;
+  line-height: 1.45;
+  tab-size: 2;
+}
+.ws-json__actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+.ws-json__msg { white-space: pre-wrap; }
 </style>
