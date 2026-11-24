@@ -17,7 +17,6 @@ import {
 import WorkspacePanel from './components/WorkspacePanel.vue';
 import WorkspaceFilesRail from './components/WorkspaceFilesRail.vue';
 import WorkspaceGitCard from './components/WorkspaceGitCard.vue';
-import WorkspaceOverviewCard from './components/WorkspaceOverviewCard.vue';
 import { ensureWorkspaceSessions } from './workspace-prefetch';
 import { changedCount, conflictCount } from './git-changes';
 import {
@@ -31,7 +30,6 @@ import {
   workspacePickIntent,
 } from './workspace';
 import { consumeEvent, resetCaches, workspace, workspaceRevision } from './workspace-store';
-import { consumeOverviewResult, requestOverview, resetOverview } from './workspace-overview';
 import {
   consumeConversationDeleteResult,
   resetConversationDeletes,
@@ -40,23 +38,6 @@ import {
 function available(teamId: string | null): boolean {
   const team = teamId === null ? currentTeam(state) : state.teams.find((item) => item.id === teamId) ?? null;
   return !!team && teamModuleEnabled(team, 'echo-agent.workspace') && teamToolAvailable(team, 'workspace');
-}
-
-/**
- * 某人格所属 Core：优先取 `(id, activeRegion)` 命中的那一条（多上游同名
- * 人格是常态），再退回同 id 首条 / activeRegion。
- *
- * 概览请求与卡片展示**必须用同一个 core 键**，否则 `(core, team)` 投影查
- * 不到自己刚发的请求（表现为卡片一直「暂无概览」）。
- */
-function teamCore(teamId: string | null): string | null {
-  const region = state.activeRegion ?? null;
-  const team = teamId === null
-    ? currentTeam(state)
-    : state.teams.find((item) => item.id === teamId && (item.core ?? null) === region)
-      ?? state.teams.find((item) => item.id === teamId)
-      ?? null;
-  return team?.core ?? region;
 }
 
 function workspaceCard(teamId: string | null): WorkspaceSessionInfo | null {
@@ -129,8 +110,7 @@ function setup(context: PanelAppContext): void {
       if (!state.connected) {
         fetchKey = '';
         wasConnected = false;
-        // 断连 = 新基线：未完成的概览 / 删除请求全部作废，避免旧计时器改新状态。
-        resetOverview();
+        // 断连 = 新基线：未完成的删除请求全部作废，避免旧计时器改新状态。
         resetConversationDeletes();
         return;
       }
@@ -146,10 +126,6 @@ function setup(context: PanelAppContext): void {
       if (fetchKey === `${connectionEpoch}:${key}`) return;
       fetchKey = `${connectionEpoch}:${key}`;
       sendCommand({ RequestWorkspaceSessions: { team_id: team.id } });
-      // 概览走**模块私有方法**（通用调用通道 `InvokeModuleOp`），不经宿主
-      // `BackendCommand`。与列表同批触发；回包丢失由 overview store 的 8s
-      // 计时器收敛，不阻塞列表与面板。
-      requestOverview(team.id, teamCore(team.id) ?? context.core.value ?? null);
     },
     { immediate: true },
   );
@@ -166,9 +142,7 @@ registerPanelExtension(definePanelExtension({
     acceptEvent(event) {
       // 模块私有方法的回执（`ModuleInvokeResult`）按 request_id 配对；
       // 命中、迟到、别的窗口的回包都由本扩展消化，不进入壳的通用 reducer。
-      // 删除（C3b）与概览（C4）是两条独立方法，各自配对。
       if (consumeConversationDeleteResult(event)) return false;
-      if (consumeOverviewResult(event)) return false;
       // 工作区自己的三帧（会话列表 / git 状态 / 目录浏览）由本扩展归约，
       // 不进壳的通用 reducer——壳里没有工作区的字段。
       if (consumeEvent(event)) return false;
@@ -199,7 +173,7 @@ registerPanelExtension(definePanelExtension({
       else if (intent.kind === 'deactivate') sendWorkspaceActivate(context, null);
     },
   },
-  railCardSlots: ['files', 'git', 'overview'],
+  railCardSlots: ['files', 'git'],
   entries: [{
     id: 'sessions',
     label: '工作区',
@@ -208,20 +182,19 @@ registerPanelExtension(definePanelExtension({
     when: ({ teamId }) => available(teamId),
     prefetch: ({ teamId, core }) => { ensureWorkspaceSessions(teamId, core); },
   }],
+  // 入口按钮（entries）与弹层（overlays）是**两个独立注册面**：只登记 entries
+  // 会有按钮但点开无内容（2026-11 事故：编辑时误删这一行）。两处 `id` 必须
+  // 都是 `sessions`——点击时 Panel 用 `extension:<id>:sessions` 去 overlays 里
+  // 找同 id 的组件。
   overlays: [{ id: 'sessions', label: '工作区会话', component: WorkspacePanel }],
   railCards(teamId) {
-    const scope = teamId ?? state.teams[0]?.id ?? null;
-    // 概览不依赖「当前有激活工作区」：没有人格级激活时也能看数量。
-    const overviewCards = available(scope)
-      ? [{
-          id: 'overview',
-          title: '工作区概览',
-          component: WorkspaceOverviewCard,
-          componentProps: { teamId: scope, core: teamCore(scope) },
-        }]
-      : [];
+    // 读一次结构版本号：`workspace` 是**普通对象**（见 workspace-store.ts），
+    // 不读它就等于卡片列表不依赖它——回包晚到时会一直沿用首帧算出的空列表，
+    // 直到某个无关的 `state.*` 变化碰巧把 computed 顶翻（2026-11 用户看到的
+    // 「文件浏览器时有时无、过一会儿又自己出现」就是这个）。
+    void workspaceRevision.value;
     const session = workspaceCard(teamId);
-    if (!session) return overviewCards;
+    if (!session) return [];
     const scoped = sessionKey(state.activeRegion, session.id);
     const dirs = workspace.gitBySession[scoped] ?? [];
     // 徽标口径与卡内一致（`git-changes.ts`：已暂存 + 已修改 + 未跟踪）；冲突
@@ -234,7 +207,6 @@ registerPanelExtension(definePanelExtension({
         ? `${changed} 项变更`
         : undefined;
     return [
-      ...overviewCards,
       {
         id: 'files',
         title: `文件浏览器 · ${session.name}`,
