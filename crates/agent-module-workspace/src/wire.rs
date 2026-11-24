@@ -129,12 +129,26 @@ pub struct WorkspaceGitInfo {
     pub modified: u32,
     #[serde(default)]
     pub untracked: u32,
+    /// 变更文件路径（扁平表，老前端兼容视图；由 `changed_entries` 派生）。
     #[serde(default)]
     pub changed_files: Vec<String>,
     #[serde(default)]
     pub changed_entries: Vec<WorkspaceChangedEntry>,
     #[serde(default)]
     pub last_commit: Option<String>,
+    /// 最近一次提交的**提交者时间**（RFC 3339；取不到为 None）。
+    ///
+    /// 与 `last_commit` 分开传：面板要算"3 分钟前"这类相对时间，塞进摘要
+    /// 就只能靠解析字符串，一改摘要格式就静默失效。取不到时留 None，面板
+    /// 不显示时间——比显示一个假时间诚实。
+    #[serde(default)]
+    pub last_commit_time: Option<String>,
+    /// stash 条目数（`git stash list` 行数；只读计数，不碰内容）。
+    ///
+    /// stash 是"我以为处理了、其实还挂在那儿"的东西，攒到十几个才发现通常
+    /// 已经忘了哪个是哪个。只数条数，不列出内容（内容可能含密钥）。
+    #[serde(default)]
+    pub stash: u32,
     #[serde(default)]
     pub error: Option<String>,
 }

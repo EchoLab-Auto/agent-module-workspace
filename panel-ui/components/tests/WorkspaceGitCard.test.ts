@@ -47,8 +47,13 @@ function gitCalls() {
     .mocked(sendCommand)
     .mock.calls.map((c) => c[0])
     .filter(
-      (c): c is { RequestWorkspaceGitStatus: { team_id?: string | null; session_id: string } } =>
-        typeof c === 'object' && c !== null && 'RequestWorkspaceGitStatus' in c,
+      (c): c is {
+        RequestWorkspaceGitStatus: {
+          team_id?: string | null;
+          session_id: string;
+          directories?: string[] | null;
+        };
+      } => typeof c === 'object' && c !== null && 'RequestWorkspaceGitStatus' in c,
     );
 }
 
@@ -136,8 +141,9 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
     expect(rowTip).toContain('/home/evence/code_file/gitlab/echo-tech/ui-frame');
     expect(rowTip).toContain('已修改 3');
     expect(rowTip).toContain('abc1234 初始提交');
-    // 快照到达即收掉加载态（不必等 8s 超时）
-    expect(wrapper.text()).not.toContain('读取中…');
+    // 快照到达即收掉加载态（不必等 8s 超时）。刷新控件是图标按钮，
+    // 忙碌态看 `aria-busy`（文字在 2026-11 从按钮里撤掉了）。
+    expect(wrapper.find('button').attributes('aria-busy')).toBeUndefined();
     wrapper.unmount();
   });
 
@@ -309,7 +315,8 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
   });
 
   it('刷新按钮：再发一次同一会话的请求；未连接时禁用', async () => {
-    // 已有快照 → 挂载时不进加载态（按钮可点）且不闪「读取中…」
+    // 已有快照 → 挂载时不进加载态（按钮可点）。刷新控件自 2026-11 是**图标
+    // 按钮**（不再是「刷新」文字），语义与忙碌态都落在 aria 属性上。
     wsStore.gitBySession = {
       [sessionKey(null, 'core')]: [info({ branch: 'main' })],
     };
@@ -318,8 +325,8 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
       props: { teamId: 'EchoCode', session: workspace() },
     });
     await nextTick();
-    expect(wrapper.text()).toContain('刷新');
-    expect(wrapper.text()).not.toContain('读取中…');
+    expect(wrapper.find('button').attributes('aria-label')).toBe('刷新 git 状态');
+    expect(wrapper.find('button').attributes('aria-busy')).toBeUndefined();
     const before = gitCalls().length;
     await wrapper.find('button').trigger('click');
     expect(gitCalls().length).toBe(before + 1);
@@ -337,10 +344,11 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
       props: { teamId: 'EchoCode', session: workspace() },
     });
     await nextTick();
-    expect(wrapper.text()).toContain('读取中…');
+    expect(wrapper.find('button').attributes('aria-busy')).toBe('true');
     vi.advanceTimersByTime(8000);
     await nextTick();
-    expect(wrapper.text()).toContain('刷新');
+    expect(wrapper.find('button').attributes('aria-busy')).toBeUndefined();
+    expect(wrapper.find('button').attributes('aria-label')).toBe('刷新 git 状态');
     wrapper.unmount();
     vi.useRealTimers();
   });
@@ -496,6 +504,236 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
     await nextTick();
     expect(wrapper.findAll('.wgc-file__name').map((e) => e.text())).toEqual(['new.ts']);
     expect(wrapper.find('.wgc-file').attributes('title')).toContain('src/old.ts -> src/new.ts');
+    wrapper.unmount();
+  });
+  // ── 冲突 / 汇总 / 过滤 / 可访问性（2026-10 拓展）──────────────────────
+
+  it('冲突：行上红色角标 + 明细里第一个 chip，且默认铺开', async () => {
+    const wrapper = mountWith([
+      detail({
+        staged: 1,
+        modified: 1,
+        untracked: 0,
+        changed_entries: [{ path: 'src/conflict.ts', index: 'U', worktree: 'U' }],
+      }),
+    ]);
+    await nextTick();
+    expect(wrapper.find('.wgc-conflict').text()).toBe('!1');
+    expect(wrapper.find('.wgc-conflict').attributes('title')).toContain('1 个未解决的冲突');
+    // 冲突排在最前（"必须先处理"的那一类）
+    expect(wrapper.findAll('.wgc-group')[0].text()).toContain('冲突');
+    // 冲突条目只归入冲突类：不再同时出现在已暂存 / 已修改的清单里
+    expect(wrapper.findAll('.wgc-file__name').map((e) => e.text())).toEqual(['conflict.ts']);
+    expect(wrapper.find('.wgc-file__st').text()).toBe('U');
+    wrapper.unmount();
+  });
+
+  it('冲突不受「改动少才自动铺开」限制：大改动也能一眼看到冲突文件', async () => {
+    const wrapper = mountWith([
+      detail({
+        staged: 0,
+        modified: 10,
+        untracked: 0,
+        changed_entries: [
+          { path: 'src/conflict.ts', index: 'U', worktree: 'U' },
+          ...Array.from({ length: 10 }, (_, i) => ({
+            path: `src/m-${i}.ts`,
+            index: ' ',
+            worktree: 'M',
+          })),
+        ],
+      }),
+    ]);
+    await nextTick();
+    // 冲突铺开、已修改（10 个 > 阈值）仍保持折叠
+    expect(wrapper.findAll('.wgc-file__name').map((e) => e.text())).toEqual(['conflict.ts']);
+    wrapper.unmount();
+  });
+
+  it('多目录：一句汇总 + 「只看变更」把干净仓库暂时收起', async () => {
+    const wrapper = mountWith([
+      info({
+        directory: '/srv/dirty',
+        branch: 'main',
+        modified: 3,
+        changed_entries: [
+          { path: 'a.ts', index: ' ', worktree: 'M' },
+          { path: 'b.ts', index: ' ', worktree: 'M' },
+          { path: 'c.ts', index: ' ', worktree: 'M' },
+        ],
+      }),
+      info({ directory: '/srv/clean', branch: 'main' }),
+    ]);
+    await nextTick();
+    expect(wrapper.find('.wgc-summary').text()).toContain('2 个仓库');
+    expect(wrapper.find('.wgc-summary').text()).toContain('3 项变更');
+    expect(wrapper.findAll('.wgc-row').length).toBe(2);
+
+    const toggle = wrapper.find('.wgc-only-changed');
+    expect(toggle.attributes('aria-pressed')).toBe('false');
+    await toggle.trigger('click');
+    expect(toggle.attributes('aria-pressed')).toBe('true');
+    expect(wrapper.findAll('.wgc-row__name').map((e) => e.text())).toEqual(['dirty']);
+    // 再点恢复：干净的仓库回到列表
+    await toggle.trigger('click');
+    expect(wrapper.findAll('.wgc-row__name').map((e) => e.text())).toEqual(['dirty', 'clean']);
+    wrapper.unmount();
+  });
+
+  it('单目录不显示汇总行（行上已经说清了，省一行高度）', async () => {
+    const wrapper = mountWith([info({ branch: 'main', modified: 1 })]);
+    await nextTick();
+    expect(wrapper.find('.wgc-summary').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('明细多时出现过滤框：按文件名过滤，命中为零时说明一句', async () => {
+    const wrapper = mountWith([
+      detail({
+        staged: 0,
+        modified: 9,
+        untracked: 0,
+        changed_entries: Array.from({ length: 9 }, (_, i) => ({
+          path: `src/f-${i}.ts`,
+          index: ' ',
+          worktree: 'M',
+        })),
+      }),
+    ]);
+    await nextTick();
+    // 9 个 > 自动铺开阈值 → 先点开已修改
+    const chip = wrapper.findAll('.wgc-group').find((c) => c.text().includes('已修改'))!;
+    await chip.trigger('click');
+    expect(wrapper.findAll('.wgc-file').length).toBe(9);
+    expect(wrapper.find('.wgc-search').exists()).toBe(true);
+
+    await wrapper.find('.wgc-search').setValue('f-7');
+    expect(wrapper.findAll('.wgc-file__name').map((e) => e.text())).toEqual(['f-7.ts']);
+    await wrapper.find('.wgc-search').setValue('no-such-file');
+    expect(wrapper.findAll('.wgc-file').length).toBe(0);
+    expect(wrapper.text()).toContain('没有匹配');
+    wrapper.unmount();
+  });
+
+  it('可访问性：行可聚焦、带 aria-expanded，Enter 也能展开 / 收起', async () => {
+    const wrapper = mountWith([info({ branch: 'main', modified: 1 })]);
+    await nextTick();
+    const row = wrapper.find('.wgc-row');
+    expect(row.attributes('role')).toBe('button');
+    expect(row.attributes('tabindex')).toBe('0');
+    // 单目录默认展开
+    expect(row.attributes('aria-expanded')).toBe('true');
+    await row.trigger('keydown', { key: 'Enter' });
+    expect(wrapper.findAll('.wgc-detail').length).toBe(0);
+    expect(wrapper.find('.wgc-row').attributes('aria-expanded')).toBe('false');
+    wrapper.unmount();
+  });
+
+  it('非仓库行不是按钮（不可展开，也就不该进 Tab 序）', async () => {
+    const wrapper = mountWith([info({ directory: '/srv/x', is_repo: false, error: '目录不存在' })]);
+    await nextTick();
+    const row = wrapper.find('.wgc-row');
+    expect(row.attributes('role')).toBeUndefined();
+    expect(row.attributes('tabindex')).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  // ── 提交时间 / stash / 单目录刷新（2026-10 拓展二）───────────────────
+
+  it('最近提交时间按相对说法显示，精确时间留在悬停提示里', async () => {
+    const twoHoursAgo = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+    const wrapper = mountWith([
+      info({ branch: 'main', last_commit: 'abc1234 init', last_commit_time: twoHoursAgo }),
+    ]);
+    await nextTick();
+    const time = wrapper.find('.wgc-meta__time');
+    expect(time.text()).toBe('2 小时前');
+    expect(time.attributes('title')).toBe(twoHoursAgo);
+    // 行提示里也有相对时间（收起态读得到）
+    expect(wrapper.find('.wgc-row').attributes('title')).toContain('2 小时前');
+    wrapper.unmount();
+  });
+
+  it('没有提交时间（老 Core / 空仓库）→ 不显示时间，也不显示假时间', async () => {
+    const wrapper = mountWith([info({ branch: 'main', last_commit: 'abc1234 init' })]);
+    await nextTick();
+    expect(wrapper.find('.wgc-meta__time').exists()).toBe(false);
+    expect(wrapper.find('.wgc-row').attributes('title')).not.toContain('前');
+    wrapper.unmount();
+  });
+
+  it('stash 数：行上描边角标 + 展开块里也标出，悬停说明条数', async () => {
+    const wrapper = mountWith([info({ branch: 'main', modified: 1, stash: 3 })]);
+    await nextTick();
+    expect(wrapper.find('.wgc-stash').text()).toBe('⚑3');
+    expect(wrapper.find('.wgc-stash').attributes('title')).toContain('3 条 stash');
+    expect(wrapper.find('.wgc-meta__stash').text()).toBe('⚑3');
+    wrapper.unmount();
+  });
+
+  it('没有 stash 时不出角标（不给 0 占位置）', async () => {
+    const wrapper = mountWith([info({ branch: 'main', modified: 1, stash: 0 })]);
+    await nextTick();
+    expect(wrapper.find('.wgc-stash').exists()).toBe(false);
+    expect(wrapper.find('.wgc-meta__stash').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('「刷新」只重读本目录：载荷带 directories: [本目录]', async () => {
+    const wrapper = mountWith([
+      info({ directory: '/srv/a', branch: 'main', modified: 1 }),
+      info({ directory: '/srv/b', branch: 'main' }),
+    ]);
+    await nextTick();
+    const before = gitCalls().length;
+    // 展开第一行才看到刷新图标
+    await wrapper.findAll('.wgc-row')[0].trigger('click');
+    const buttons = wrapper.findAll('.wgc-refresh');
+    expect(buttons.length).toBe(1);
+    await buttons[0].trigger('click');
+
+    const calls = gitCalls();
+    expect(calls.length).toBe(before + 1);
+    expect(calls[calls.length - 1].RequestWorkspaceGitStatus.directories).toEqual(['/srv/a']);
+    wrapper.unmount();
+  });
+
+  it('单目录刷新期间只有本目录进入忙碌态，整卡按钮不受影响', async () => {
+    const wrapper = mountWith([info({ directory: '/srv/a', branch: 'main', modified: 1 })]);
+    await nextTick();
+    await wrapper.find('.wgc-refresh').trigger('click');
+    // 图标按钮没有文字：忙碌态看 aria-label / aria-disabled，转动由
+    // `.wgc-refresh__spin` 承担（这里只钉语义，不钉动画）。
+    expect(wrapper.find('.wgc-refresh').attributes('aria-label')).toBe('正在读取该目录的 git 状态');
+    expect(wrapper.find('.wgc-refresh').attributes('aria-disabled')).toBe('true');
+    expect(wrapper.find('.wgc-refresh__spin').exists()).toBe(true);
+    expect(wrapper.find('button').attributes('aria-label')).toBe('刷新 git 状态');
+    expect(wrapper.find('button').attributes('aria-busy')).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it('整卡刷新不带 directories（= 全部目录，老 Core 也照旧能用）', async () => {
+    const wrapper = mountWith([info({ branch: 'main' })]);
+    await nextTick();
+    await wrapper.find('button').trigger('click');
+    const calls = gitCalls();
+    expect(calls[calls.length - 1].RequestWorkspaceGitStatus.directories).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it('单目录刷新的忙碌态在快照到达后收掉（不永久转圈）', async () => {
+    const wrapper = mountWith([info({ directory: '/srv/a', branch: 'main', modified: 1 })]);
+    await nextTick();
+    await wrapper.find('.wgc-refresh').trigger('click');
+    expect(wrapper.find('.wgc-refresh').attributes('aria-label')).toBe('正在读取该目录的 git 状态');
+    // 新快照到达
+    wsStore.gitBySession = {
+      [sessionKey(null, 'core')]: [info({ directory: '/srv/a', branch: 'main' })],
+    };
+    notifyChanged();
+    await nextTick();
+    expect(wrapper.find('.wgc-refresh').attributes('aria-label')).toBe('只刷新这个目录的 git 状态');
+    expect(wrapper.find('.wgc-refresh__spin').exists()).toBe(false);
     wrapper.unmount();
   });
 });

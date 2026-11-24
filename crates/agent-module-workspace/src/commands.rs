@@ -476,7 +476,15 @@ async fn git_status(
         state.emit_error(team_id, message.clone());
         return Err(message);
     };
-    let directories = session.directories.clone();
+    // 可选过滤：只采这些目录（面板的「刷新此目录」）。老前端 / 手写帧不带这个
+    // 字段 → 全部目录。不认得的路径直接忽略（不报错）：它要的是"少采几个"，
+    // 而不是"必须是这些"——为一个笔误的路径让整卡不刷新不值得。
+    let only: Option<Vec<String>> = payload.get("directories").and_then(|value| {
+        value
+            .as_array()
+            .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+    });
+    let directories = select_directories(&session.directories, only.as_deref());
     let mut results: Vec<Option<WorkspaceGitInfo>> = vec![None; directories.len()];
     let mut local: Vec<(usize, String)> = Vec::new();
     let mut remote: Vec<(usize, String, String)> = Vec::new();
@@ -516,6 +524,38 @@ async fn git_status(
         }
     }));
     Ok(Value::Null)
+}
+
+/// 按可选过滤挑出这次要采的目录。
+///
+/// `wanted` 为 `None` / 空 → 全部目录（老前端 / 手写帧）。给了过滤时：
+/// 命中「本机绝对路径」或「`node://<peer>/<路径>` 规范写法」都算，末尾斜杠
+/// 与前导斜杠的差异不算差异（面板的写法与 store 里存的可能差一个 `/`）。
+/// 不认得的路径**忽略**而不是报错——它要的是"少采几个"，不是"必须是这些"。
+fn select_directories(
+    all: &[crate::wire::WorkspaceDirectory],
+    wanted: Option<&[String]>,
+) -> Vec<crate::wire::WorkspaceDirectory> {
+    let Some(wanted) = wanted.filter(|items| !items.is_empty()) else {
+        return all.to_vec();
+    };
+    all.iter()
+        .filter(|dir| {
+            let qualified = match dir.node() {
+                Some(peer) => crate::remote::join_node_path(peer, dir.path()),
+                None => dir.path().to_string(),
+            };
+            let path = dir.path().trim_end_matches('/');
+            let bare = path.trim_start_matches('/');
+            wanted.iter().any(|want| {
+                let want = want.trim();
+                want == qualified
+                    || want.trim_end_matches('/') == path
+                    || want.trim_end_matches('/').trim_start_matches('/') == bare
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// 远程目录降级原因（宿主未注入 [`crate::remote::REMOTE_QUERY`] 时）。
@@ -1079,6 +1119,102 @@ mod tests {
         assert_eq!(git["is_repo"], false);
         assert!(git["error"].as_str().unwrap_or_default().contains("未接线"));
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// git 子进程）。不认得的路径忽略，不报错。
+    #[tokio::test]
+    async fn git_status_directory_filter_limits_collection() {
+        let dir = std::env::temp_dir().join(format!("echo-ws-cmd-gitf-{}", std::process::id()));
+        let (state, seen) =
+            state_with_remote_dir(&dir, json!(["node://gpu-box/srv/a", "node://gpu-box/srv/b"])).await;
+        let fake = Arc::new(FakeQuery::new(Ok(json!({"git": {"directory": "/srv/a", "is_repo": true}}))));
+        state.set_remote_query(Some(fake.clone()));
+
+        handle(
+            &state,
+            "RequestWorkspaceGitStatus",
+            json!({"team_id": "t", "session_id": "s", "directories": ["node://gpu-box/srv/b"]}),
+        )
+        .await
+        .expect("claimed")
+        .expect("ok");
+
+        // 只问了对端 b，没问 a——这才是"单目录刷新"的意义。
+        let calls = fake.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].2, "/srv/b");
+        let status = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|value| value.get("WorkspaceGitStatus").cloned())
+            .expect("应有 WorkspaceGitStatus 事件");
+        assert_eq!(status["directories"].as_array().map(Vec::len), Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 过滤里写了不存在的路径：忽略它，其余照旧（不能因为一个笔误整卡不刷新）。
+    #[tokio::test]
+    async fn git_status_unknown_filtered_directory_is_ignored() {
+        let dir = std::env::temp_dir().join(format!("echo-ws-cmd-gitfu-{}", std::process::id()));
+        let (state, seen) = state_with_remote_dir(&dir, json!(["node://gpu-box/srv/a"])).await;
+        let fake = Arc::new(FakeQuery::new(Ok(json!({"git": {"directory": "/srv/a", "is_repo": true}}))));
+        state.set_remote_query(Some(fake.clone()));
+
+        handle(
+            &state,
+            "RequestWorkspaceGitStatus",
+            json!({"team_id": "t", "session_id": "s", "directories": ["/nope/elsewhere"]}),
+        )
+        .await
+        .expect("claimed")
+        .expect("ok");
+
+        assert!(fake.calls.lock().unwrap().is_empty(), "笔误路径不该触发采集");
+        let status = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|value| value.get("WorkspaceGitStatus").cloned())
+            .expect("应有 WorkspaceGitStatus 事件");
+        assert_eq!(status["directories"].as_array().map(Vec::len), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `select_directories` 的匹配口径：本机路径 / `node://` 写法都认，尾斜杠
+    /// 与首斜杠的差异不算差异；缺省与空表都是"全部"。
+    #[test]
+    fn select_directories_matches_both_path_forms() {
+        use crate::wire::WorkspaceDirectory;
+        let all = vec![
+            WorkspaceDirectory::local("/srv/repo"),
+            WorkspaceDirectory::Qualified {
+                path: "/root/remote".into(),
+                node: Some("gpu".into()),
+            },
+        ];
+        // 缺省 / 空 → 全部
+        assert_eq!(select_directories(&all, None).len(), 2);
+        assert_eq!(select_directories(&all, Some(&[])).len(), 2);
+        // 本机路径（带不带末尾斜杠都命中）
+        assert_eq!(
+            select_directories(&all, Some(&["/srv/repo/".to_string()]))
+                .iter()
+                .map(|d| d.path().to_string())
+                .collect::<Vec<_>>(),
+            vec!["/srv/repo".to_string()]
+        );
+        // 跨机目录用 `node://<peer>/<路径>` 规范写法
+        assert_eq!(
+            select_directories(&all, Some(&["node://gpu/root/remote".to_string()]))
+                .iter()
+                .map(|d| d.path().to_string())
+                .collect::<Vec<_>>(),
+            vec!["/root/remote".to_string()]
+        );
+        // 不认得的忽略
+        assert!(select_directories(&all, Some(&["/nope".to_string()])).is_empty());
     }
 
     /// 文件浏览：远程路径走接缝（面板要的是空结果 + error，不是抛错）。

@@ -135,9 +135,18 @@ pub fn collect_dir_git(directory: &str) -> WorkspaceGitInfo {
     }
     // 变更清单（porcelain v1：XY<空格>路径；`??` = 未跟踪）。
     //
+    // `core.quotepath=false`：git 默认会把非 ASCII 路径转义成八进制
+    // （`"\344\270\255\346\226\207.txt"`），面板上就会显示一段谁也读不懂的
+    // 转义串——文件名恰恰是这张卡片最要紧的信息。关掉转义后中文路径原样回传。
+    // 含空格 / 引号 / 换行的路径仍按 porcelain v1 加引号（那是另一个问题，
+    // 要彻底解决得换 `-z`，线格式会变，此处不动）。
+    //
     // 明细按**类别各自**截断：一个目录里上百个未跟踪构建产物不能把仅有的几条
     // 暂存改动挤出清单——UI 上就是标题写着「已暂存 2」、点开却空空如也。
-    if let GitOutcome::Ok(out) = run_git(directory, &["status", "--porcelain"]) {
+    if let GitOutcome::Ok(out) = run_git(
+        directory,
+        &["-c", "core.quotepath=false", "status", "--porcelain"],
+    ) {
         let mut listed = [0usize; 3]; // 已暂存 / 已修改 / 未跟踪
         for line in out.lines() {
             if line.len() < 3 {
@@ -189,15 +198,39 @@ pub fn collect_dir_git(directory: &str) -> WorkspaceGitInfo {
             .map(|e| e.path.clone())
             .collect();
     }
-    // 最近一次提交摘要（仓库无提交时失败 → None）。
-    if let GitOutcome::Ok(out) = run_git(directory, &["log", "-1", "--pretty=format:%h %s"]) {
-        let line = out.trim();
-        if !line.is_empty() {
-            info.last_commit = Some(line.to_string());
+    // 最近一次提交：摘要与提交时间一次取出（同一子进程，不为此多跑一条）。
+    //
+    // 用 `%x00` 作分隔符而不是空格：subject 里可能有任意空格，摘要在最前、
+    // 时间在中、subject 在尾，三段才切得干净。`%cI` = 提交者时间（ISO 8601 /
+    // RFC 3339，带时区），git 2.2 起可用；更老的 git 会让整条命令失败，此时
+    // 两项都留空（不显示，而不是显示错的）。
+    if let GitOutcome::Ok(out) = run_git(
+        directory,
+        &["log", "-1", "--pretty=format:%h%x00%cI%x00%s"],
+    ) {
+        let mut parts = out.trim().split('\0');
+        let hash = parts.next().unwrap_or("").trim();
+        let time = parts.next().unwrap_or("").trim();
+        let subject = parts.next().unwrap_or("").trim();
+        if !hash.is_empty() {
+            info.last_commit = Some(if subject.is_empty() {
+                hash.to_string()
+            } else {
+                format!("{hash} {subject}")
+            });
         }
+        if !time.is_empty() {
+            info.last_commit_time = Some(time.to_string());
+        }
+    }
+    // stash 条数（只数行数，不看内容）。无 stash 时 `stash list` 输出为空、
+    // 退出码 0；不在仓库里早在上面的探测就返回了，走不到这里。
+    if let GitOutcome::Ok(out) = run_git(directory, &["stash", "list"]) {
+        info.stash = out.lines().filter(|line| !line.trim().is_empty()).count() as u32;
     }
     info
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -288,6 +321,107 @@ mod tests {
                 .any(|e| e.path == "a-staged.txt"),
             "staged change must survive an untracked flood: {info:?}"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 在临时仓库里跑一条 git 命令（失败即 panic，省得测试静默通过）。
+    fn git_in(root: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// porcelain 路径不做八进制转义：中文文件名必须原样回传，否则卡片上
+    /// 显示的是 `"\344\270\255\346\226\207.txt"`，用户读不出改了哪个文件。
+    #[test]
+    fn porcelain_paths_are_not_escaped() {
+        let root = scratch_repo("quotepath");
+        std::fs::write(root.join("中文.txt"), "x").unwrap();
+        let info = collect_dir_git(root.to_str().unwrap());
+        assert_eq!(info.untracked, 1, "{info:?}");
+        assert_eq!(info.changed_entries[0].path, "中文.txt", "{info:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 冲突（unmerged）条目原样保留两列字符，交由展示侧归类。
+    ///
+    /// 采集侧不解释 `UU` 的含义——归类（冲突 / 已暂存 / 已修改）是 UI 的决定。
+    /// 这条测试钉住"两个 `U` 一路原样送到线格式上"。
+    #[test]
+    fn unmerged_entries_keep_both_status_columns() {
+        let root = scratch_repo("conflict");
+        git_in(&root, &["config", "user.email", "t@example.com"]);
+        git_in(&root, &["config", "user.name", "t"]);
+        std::fs::write(root.join("a.txt"), "base\n").unwrap();
+        git_in(&root, &["add", "a.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "base"]);
+        git_in(&root, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(root.join("a.txt"), "side\n").unwrap();
+        git_in(&root, &["commit", "-q", "-am", "side"]);
+        git_in(&root, &["checkout", "-q", "-"]);
+        std::fs::write(root.join("a.txt"), "main\n").unwrap();
+        git_in(&root, &["commit", "-q", "-am", "main"]);
+        // 合并必然冲突（退出码非零，故不用 git_in）。
+        let _ = std::process::Command::new("git")
+            .args(["-C", root.to_str().unwrap(), "merge", "side"])
+            .output();
+
+        let info = collect_dir_git(root.to_str().unwrap());
+        let entry = info
+            .changed_entries
+            .iter()
+            .find(|e| e.path == "a.txt")
+            .unwrap_or_else(|| panic!("conflict entry missing: {info:?}"));
+        assert_eq!((entry.index.as_str(), entry.worktree.as_str()), ("U", "U"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 提交时间与 stash 数（2026-10）：一次 `log` 取摘要 + 时间，`stash list`
+    /// 只数条数。
+    #[test]
+    fn collects_commit_time_and_stash_count() {
+        let root = scratch_repo("time");
+        git_in(&root, &["config", "user.email", "t@example.com"]);
+        git_in(&root, &["config", "user.name", "t"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git_in(&root, &["add", "a.txt"]);
+        git_in(&root, &["commit", "-q", "-m", "first commit"]);
+
+        let info = collect_dir_git(root.to_str().unwrap());
+        assert_eq!(info.last_commit.as_deref().map(|s| s.contains("first commit")), Some(true), "{info:?}");
+        // 摘要仍是 `<short-hash> <subject>`（老前端照常显示整串）
+        let summary = info.last_commit.clone().unwrap();
+        assert!(summary.split(' ').next().map(|h| h.len() >= 7).unwrap_or(false), "{summary}");
+        // 时间必须是 RFC 3339（`2026-10-19T10:23:45+08:00` 这种形状）
+        let time = info.last_commit_time.clone().expect("commit time");
+        assert!(time.len() >= 19 && time.contains('T'), "not RFC3339: {time}");
+        assert_eq!(info.stash, 0, "没有 stash 时报 0");
+
+        // 造两条 stash（stash 需要改动才能存）
+        for i in 0..2 {
+            std::fs::write(root.join("a.txt"), format!("stashed-{i}\n")).unwrap();
+            git_in(&root, &["stash", "push", "-q", "-m", &format!("s{i}")]);
+        }
+        let info = collect_dir_git(root.to_str().unwrap());
+        assert_eq!(info.stash, 2, "{info:?}");
+        // stash 不影响工作区干净的判断
+        assert_eq!((info.staged, info.modified, info.untracked), (0, 0, 0), "{info:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 无提交的空仓库：两个新字段都是缺省（None / 0），不是报错。
+    #[test]
+    fn empty_repo_reports_no_commit_time() {
+        let root = scratch_repo("empty");
+        let info = collect_dir_git(root.to_str().unwrap());
+        assert!(info.is_repo, "{info:?}");
+        assert_eq!(info.last_commit, None);
+        assert_eq!(info.last_commit_time, None);
+        assert_eq!(info.stash, 0);
         std::fs::remove_dir_all(&root).ok();
     }
 

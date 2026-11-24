@@ -19,6 +19,7 @@ import WorkspaceFilesRail from './components/WorkspaceFilesRail.vue';
 import WorkspaceGitCard from './components/WorkspaceGitCard.vue';
 import WorkspaceOverviewCard from './components/WorkspaceOverviewCard.vue';
 import { ensureWorkspaceSessions } from './workspace-prefetch';
+import { changedCount, conflictCount } from './git-changes';
 import {
   LOCAL_DEFAULT_SESSION,
   decideOnWorkspaceBroadcast,
@@ -223,7 +224,15 @@ registerPanelExtension(definePanelExtension({
     if (!session) return overviewCards;
     const scoped = sessionKey(state.activeRegion, session.id);
     const dirs = workspace.gitBySession[scoped] ?? [];
-    const changed = dirs.reduce((sum, dir) => sum + (dir.staged ?? 0) + (dir.modified ?? 0) + (dir.untracked ?? 0), 0);
+    // 徽标口径与卡内一致（`git-changes.ts`：已暂存 + 已修改 + 未跟踪）；冲突
+    // 另算一句提示——它是要最早看到的那条信息，但不该把徽标数字再放大一份。
+    const changed = dirs.reduce((sum, dir) => sum + changedCount(dir), 0);
+    const conflicts = dirs.reduce((sum, dir) => sum + conflictCount(dir), 0);
+    const countTitle = conflicts
+      ? `${changed} 项变更，其中 ${conflicts} 个冲突未解决`
+      : changed
+        ? `${changed} 项变更`
+        : undefined;
     return [
       ...overviewCards,
       {
@@ -236,7 +245,7 @@ registerPanelExtension(definePanelExtension({
         id: 'git',
         title: 'Git 状态',
         count: changed,
-        countTitle: changed ? `${changed} 项变更` : undefined,
+        countTitle,
         component: WorkspaceGitCard,
         componentProps: { session, teamId: teamId ?? state.teams[0]?.id ?? null },
       },

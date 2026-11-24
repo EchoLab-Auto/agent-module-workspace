@@ -16,10 +16,10 @@ y: 240
 
 | 面 | 内容 |
 |---|---|
-| `railCardSlots` | `['files', 'git', 'overview']`——允许这三张卡被用户拖到左右边栏 |
+| `railCardSlots` | `['files', 'git']`——允许这两张卡被用户拖到左右边栏 |
 | `entries` | 一条「工作区」入口（图标 `folder`），`when` 命中时出现，`prefetch` 预热会话列表 |
 | `overlays` | 工作区会话弹层 → `WorkspacePanel` |
-| `railCards(teamId)` | 概览卡（模块启用即有，不依赖激活工作区）+ 文件浏览器卡 + Git 状态卡（后两张随激活工作区出现） |
+| `railCards(teamId)` | 文件浏览器卡 + Git 状态卡（均随激活工作区出现） |
 | hooks | `setup` / `teamLanding` / `acceptEvent` / `toolPresentation` / `sessionPresentation` / `canConfigureSessionApi` / `beforeSessionPick` |
 
 门控只有一条：`available(teamId)` = 该人格 `teamModuleEnabled(team, 'echo-agent.workspace')` **且** `teamToolAvailable(team, 'workspace')`。前端是独立部署选择——模块未挂载时整块入口消失，而不是点进去报错。
@@ -28,15 +28,22 @@ y: 240
 
 | 卡片 | 组件 | 内容 |
 |---|---|---|
-| 工作区概览 | `WorkspaceOverviewCard` | 工作区数 / 对话数 / 目录数 / 远程目录数 + 激活项；不依赖激活工作区 |
 | 文件浏览器 | `WorkspaceFilesRail` → `WorkspaceFileBrowser` | 限会话已声明目录及其子孙（canonical 前缀校验在后端） |
-| Git 状态 | `WorkspaceGitCard` | 每目录一行：分支 + 领先落后 + 三类变更计数；点击展开类别开关、父目录、最近提交 |
+| Git 状态 | `WorkspaceGitCard` → `WorkspaceGitDir` | 每目录一行：分支 + 领先落后 + 冲突角标 + 三类变更计数；点击展开类别开关、过滤框、父目录、最近提交 |
 
-Git 卡的计数是**各目录 staged + modified + untracked 之和**（`railCards` 里聚合），即边栏标题上的徽标。展开后三个数字本身是开关：点「已修改 4」列出那 4 个文件及 porcelain 状态字符。变更 ≤ 6 个文件的目录展开后自动铺开，再多只留计数。
+Git 卡的计数是**各目录 staged + modified + untracked 之和**（`railCards` 里聚合），即边栏标题上的徽标。展开后计数本身是开关：点「已修改 4」列出那 4 个文件及 porcelain 状态字符。变更 ≤ 6 个文件的目录展开后自动铺开，再多只留计数。
 
-**不轮询**：挂载 / 切换工作区会话 / 重连时发 `RequestWorkspaceGitStatus`（必须带 `team_id`，否则 Core 路由到默认 agent），其余靠刷新按钮。git 状态只在主动改代码后变，定时拉会把 `git status` 变成常驻后台开销（工作区目录可能是跨机节点）。整个扩展没有 `setInterval`；超时收敛全靠 `setTimeout`（概览 8s、删除 7s——比组件的 8s 早 1s，好先给出模块语义文案）。
+**多目录的一屏效率**：顶部一句汇总（几仓库 / 多少变更 / 几个冲突）+「只看变更」开关，把干净的仓库暂时收起；非仓库 / 读失败的行永远保留（那是错误，不是「没改动」）。明细超过 8 条时出现过滤框，按路径子串过滤已铺开的行（不改计数）。
 
-概览卡走**模块私有方法**（`InvokeModuleOp` → `workspace.overview`），不经宿主协议；回包丢失由 overview store 的 8s 计时器收敛，不阻塞列表与面板。
+**最近提交时间与 stash**：展开块的附加信息行显示提交的相对时间（`3 小时前`，精确 ISO 时间在悬停提示里）与 stash 条数（行上是描边角标 `⚑N`）。两者都是**有则显示、无则留空**——老 Core 不发这两列、或仓库还没有提交时，不显示，也不显示假值。协议字段是 `last_commit_time`（RFC 3339）与 `stash`（`git stash list` 行数），由模块 `git.rs` 采集（提交时间与摘要同一次 `log` 取出，stash 只数条数、不读内容）。
+
+**只刷新一个目录**：展开块的刷新图标发 `RequestWorkspaceGitStatus` 时带 `directories: [该目录]`，模块只采这几个目录——改完一个仓库不该让其余四个也各跑 5-6 条 git 子进程。字段缺省 = 全部目录（整卡刷新不发这个字段，老 Core 照旧可用）；过滤里写了不在会话中的路径由模块忽略而不报错（它要的是"少采几个"，不是"必须是这些"）。
+
+**两个刷新入口都是图标**（2026-11）：整卡用 `NeumorphismButton`（`refresh` 图标 + 内建 spinner，忙碌时按钮自带旋转且内容隐藏），单目录用 `.wgc-refresh` 里的 `PanelIcon` + 自转动画。文字撤掉后**语义必须落在 aria 上**：`aria-label`（「刷新 git 状态」/「只刷新这个目录的 git 状态」）+ 忙碌态 `aria-busy` / `aria-disabled`，`title` 仍给悬停解释——测试因此断言 aria 而不是可见文本。
+
+纯计算（归类 / 计数 / 路径裁剪 / 相对时间）在 `git-changes.ts`，展开态（行展开 + 类别开关）在 `git-expansion.ts`，两者各自单测；组件只剩取数与版面，`WorkspaceGitDir.vue` 负责单目录的行与明细（含「刷新」与忙碌态）。行与 chip 都是 `role="button"` + `aria-expanded`，Enter / Space 等价于点击。
+
+**不轮询**：挂载 / 切换工作区会话 / 重连时发 `RequestWorkspaceGitStatus`（必须带 `team_id`，否则 Core 路由到默认 agent），其余靠刷新按钮。git 状态只在主动改代码后变，定时拉会把 `git status` 变成常驻后台开销（工作区目录可能是跨机节点）。整个扩展没有 `setInterval`；超时收敛全靠 `setTimeout`（删除 7s——比组件的 8s 早 1s，好先给出模块语义文案）。
 
 ## 主面板
 
@@ -70,9 +77,11 @@ Git 卡的计数是**各目录 staged + modified + untracked 之和**（`railCar
 2. **过滤别的 persona**：store 是 per-persona 的，而 `WorkspaceSessions` 经进程级 EventSink 广播给所有 Panel 连接；不过滤时另一个窗口（或模型用 `use` 工具）激活工作区会覆盖本窗口的单槽。放行条件是 `team_id` 缺省（旧 Core 帧）或本端尚未确定 agent
 3. **拒绝旧快照**：`generation` 只增，切 team / core 后迟到的列表不认
 
-拉取时机由 `setup` 里的 watch 决定：连接状态 + teams + 当前人格变化 → `RequestWorkspaceSessions` + 概览请求。断连时作废未完成的概览 / 删除请求并按新基线重置缓存（`resetCaches` / `resetOverview` / `resetConversationDeletes`）。
+**卡片列表本身就是响应式消费者**：`railCards(teamId)` 是 `PanelSidebar` 里 `railCardsFor` computed 的数据源，而 `workspace` 不是响应式对象——不读 `workspaceRevision` 就等于「这张列表不依赖工作区数据」：首帧算出的空列表会被缓存，回包到达也不重算（表现为右栏只剩内置卡；过一会儿某个无关的 `state.*` 变化碰巧顶翻 computed 又自己冒出来）。回归测试 `panel-ui/tests/rail-cards-reactivity.test.ts` 钉住这条时序。
 
-`acceptEvent` 是扩展的归约入口：命中工作区三帧、概览回执、删除回执时返回 `false`（已消费，不进壳的通用 reducer），壳里没有工作区的字段。
+拉取时机由 `setup` 里的 watch 决定：连接状态 + teams + 当前人格变化 → `RequestWorkspaceSessions`。断连时作废未完成的删除请求并按新基线重置缓存（`resetCaches` / `resetConversationDeletes`）。
+
+`acceptEvent` 是扩展的归约入口：命中工作区三帧或删除回执时返回 `false`（已消费，不进壳的通用 reducer），壳里没有工作区的字段。
 
 ## 多窗口与激活规则
 
@@ -88,4 +97,3 @@ Git 卡的计数是**各目录 staged + modified + untracked 之和**（`railCar
 - 远端目录的 git / 文件结果由后端降级为占位条目（原因文本来自对端或「跨机查询未接线」），前端照常渲染该目录行与错误说明，不隐藏、不合并进本机结果
 - 显示名用 `federatedPeerLabel` 转成人读的节点名；原始 `node://` 串只用于路径与识别
 - 删除对话入口后，扩展侧也维护一份 `retired` 集合（按 `(core, team, workspace)` 作用域），只用于**新建对话的 id 避让**——不得用它过滤保存载荷，否则会把服务端已退役的对话写回
-- 概览请求与卡片展示必须用**同一个 core 键**（`teamCore(teamId)`）：否则 `(core, team)` 投影查不到自己刚发的请求，表现为卡片一直「暂无概览」

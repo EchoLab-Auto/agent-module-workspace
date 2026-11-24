@@ -20,7 +20,7 @@ y: 560
 | `SaveWorkspaceSession` | `session`（完整对象） | upsert（`id` 空则按名称生成 slug） | 变更提示（`Error` 事件承载文案） |
 | `DeleteWorkspaceSession` | `id` | 删除会话 | 不存在时报「工作区会话 {id} 不存在」 |
 | `ActivateWorkspaceSession` | `id`（空 = 取消激活）、`conversation` | 设置/清除激活标记 | 激活回执文案；通道注册与广播由宿主完成 |
-| `RequestWorkspaceGitStatus` | `session_id`（**历史命名，实际是工作区 id**） | 采集各目录 git 快照 | `WorkspaceGitStatus {team_id, session_id, directories}` |
+| `RequestWorkspaceGitStatus` | `session_id`（**历史命名，实际是工作区 id**）+ 可选 `directories`（只采这些目录；缺省/空 = 全部，不认得的路径忽略） | 采集各目录 git 快照 | `WorkspaceGitStatus {team_id, session_id, directories}` |
 | `RequestWorkspaceFiles` | `session_id`、`path` | 列目录 | `WorkspaceFiles` 回推（`entries`），见 `files.rs` |
 | `RequestBrowseDirectories` | `path`（空 = 根列表） | 目录选择器 | `BrowseDirectories` 回推（`roots` + `entries`） |
 
@@ -75,5 +75,5 @@ y: 560
 
 - 认领优先于解析：`handle` 先判断「这条命令是不是本模块的」，不相关时返回 `None`，畸形载荷不该被认领成一个错误
 - 声明过的名字若无处理器，返回「命令 X 被声明但处理器没有认领它」——避免面板转圈
-- git 采集有硬超时（`git.rs::GIT_TIMEOUT = 5s`），明细每类最多 `CHANGED_FILES_CAP = 30` 条；文件列表最多 `files.rs::FILES_CAP = 500` 条，目录在前、文件在后，各自按名称不区分大小写排序
+- git 采集有硬超时（`git.rs::GIT_TIMEOUT = 5s`），明细每类最多 `CHANGED_FILES_CAP = 30` 条；`status` 带 `-c core.quotepath=false`，否则非 ASCII 路径会被转义成八进制（面板上是一串谁也读不懂的 `"\344\270\255"`）；提交时间与摘要由**同一次** `git log -1` 取出（`%h%x00%cI%x00%s`，`\0` 分隔以免 subject 里的空格切错），stash 数走一次 `git stash list` 只数行数、不读内容；文件列表最多 `files.rs::FILES_CAP = 500` 条，目录在前、文件在后，各自按名称不区分大小写排序
 - 文件访问用 **canonical 前缀 + `/` 的字面比较**（不是 `Path::starts_with`）判定是否落在会话已声明目录内，避免 `/a/bc` 被误判为在 `/a/b` 之下
