@@ -28,7 +28,7 @@
 //! 定时拉会把 `git status` 变成常驻后台开销（工作区目录可能是跨机节点）。
 //!
 //! 纯计算（归类 / 计数 / 路径裁剪）在 `../git-changes.ts`，展开态（行展开 +
-//! 类别开关）在 `../git-expansion.ts`，单目录的行与明细在
+//! 类别开关）在 `git-expansion.ts`，单目录的行与明细在
 //! `WorkspaceGitDir.vue`——本文件只管取数、门控、汇总与刷新。
 //!
 //! 绑定对象与文件浏览器卡同源（`index.ts::workspaceCard`）：本窗口会话是工作区
@@ -39,8 +39,8 @@ import { state } from '@echo-agent/panel';
 import { sendCommand } from '@echo-agent/panel';
 import PanelIcon from '@echo-agent/panel/components/PanelIcon';
 import type { WorkspaceGitInfo, WorkspaceSessionInfo } from '@echo-agent/panel';
-import { gitDirRevision, gitSessionKey, workspace, workspaceRevision } from '../workspace-store';
-import { directoryToInput } from '../workspace';
+import { gitDirRevision, gitSessionKey, workspace, workspaceRevision } from '../../workspace-store';
+import { directoryToInput } from '../../workspace';
 import WorkspaceGitDir from './WorkspaceGitDir.vue';
 import {
   basename,
@@ -49,8 +49,8 @@ import {
   dupNames,
   parentTail,
   repoSummary,
-} from '../git-changes';
-import { useGitExpansion } from '../git-expansion';
+} from '../../git-changes';
+import { useGitExpansion } from './git-expansion';
 
 const props = defineProps<{
   teamId: string | null;

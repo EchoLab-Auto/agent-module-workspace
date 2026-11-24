@@ -10,6 +10,47 @@ y: 240
 
 > **定位**：`panel-ui/` 这个前端扩展包——它向 Panel 壳注册了什么、边栏三张卡与主面板各做什么、状态层如何归约事件、多窗口下激活如何决策。Panel 壳只提供布置 UI 的接口与通用身份（`activeRegion` / `activeTeamId`），工作区的领域数据全部在这里。读者：改工作区界面、写其他 Panel 扩展、或排查「卡片不刷新 / 激活被别的窗口抢走」的人。
 
+## 目录结构
+
+两层判据：**一个子目录 = 一块界面**（组件、它专属的状态模块与单测就近放）；顶层平铺的只有**被多个面共用**的状态与纯计算。
+
+```text
+panel-ui/
+├── index.ts                          注册入口（definePanelExtension）
+├── components/
+│   ├── sessions/                     工作区会话弹层（overlay）
+│   │   ├── WorkspacePanel.vue        会话 / 对话管理主面板
+│   │   ├── DirectoryPicker.vue       目录选择器（嵌入上者）
+│   │   ├── use-session-json-form.ts  JSON 段的状态与规则
+│   │   ├── workspace-json.ts         三种 JSON 形态的解析（纯函数）
+│   │   └── tests/
+│   ├── files/                        文件浏览器（rail card: files）
+│   │   ├── WorkspaceFilesRail.vue    卡外壳
+│   │   ├── WorkspaceFileBrowser.vue  树主体
+│   │   └── tests/
+│   └── git/                          git 状态（rail card: git）
+│       ├── WorkspaceGitCard.vue      取数 / 汇总
+│       ├── WorkspaceGitDir.vue       单目录行与明细
+│       ├── git-expansion.ts          展开态（行展开 + 类别开关）
+│       └── tests/
+├── workspace.ts                      会话与通道 id 的纯函数 + 激活决策取证
+├── workspace-store.ts                三帧事件的归约与缓存
+├── workspace-conversation-delete.ts  删除回执配对
+├── workspace-prefetch.ts             会话列表预热（index + sessions 共用）
+├── git-changes.ts                    归类 / 计数 / 路径裁剪（纯计算，跨面共用）
+└── tests/                            跨组件的行为与协议测试
+```
+
+**归位规则**（新增文件时按这个判断，不要回填到 `components/` 根）：
+
+| 情况 | 放哪 |
+|---|---|
+| 只被一块界面用到（哪怕它没有 Vue 依赖） | 该面的子目录，与父组件同层 |
+| 被两块以上界面或 `index.ts` 用到 | 顶层 |
+| 纯计算但有跨面语义（如计数口径） | 顶层，便于两面共用同一份 |
+
+`sessions/workspace-json.ts` 与 `git/git-expansion.ts` 是「只被一块界面用到」的例子——它们是纯函数 / composable，但只有对应面会调，所以跟着面走；反例是 `git-changes.ts`：它是纯计算，可文件浏览器的路径裁剪与 Git 卡的计数口径都要用，留在顶层。
+
 ## 扩展注册面
 
 入口 `panel-ui/index.ts` 用 `definePanelExtension` 声明，`id = echo-agent.workspace`（与后端模块 id 同名）：

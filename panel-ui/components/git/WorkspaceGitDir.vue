@@ -36,7 +36,7 @@ import {
   tailDir,
   visibleGroups,
   type ChangeKind,
-} from '../git-changes';
+} from '../../git-changes';
 
 /** 明细超过这个条数才配过滤框（六个文件一眼看完，多一个输入框只是噪声）。 */
 const SEARCH_THRESHOLD = 8;

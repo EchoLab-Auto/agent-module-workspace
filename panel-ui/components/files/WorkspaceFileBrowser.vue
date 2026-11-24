@@ -26,9 +26,9 @@ import { state, federatedPeerLabel } from '@echo-agent/panel';
 import { sendCommand } from '@echo-agent/panel';
 import { scopedKey } from '@echo-agent/panel';
 import type { WorkspaceSessionInfo } from '@echo-agent/panel';
-import { directoryToInput, isRemoteDirectoryInput } from '../workspace';
+import { directoryToInput, isRemoteDirectoryInput } from '../../workspace';
 import PanelIcon from '@echo-agent/panel/components/PanelIcon';
-import { workspace, workspaceRevision } from '../workspace-store';
+import { workspace, workspaceRevision } from '../../workspace-store';
 
 const props = defineProps<{
   teamId: string | null;

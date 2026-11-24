@@ -25,7 +25,7 @@ import WorkspaceFileBrowser from '../WorkspaceFileBrowser.vue';
 import { state } from '@echo-agent/panel';
 import { sendCommand } from '@echo-agent/panel';
 import type { WorkspaceSessionInfo } from '@echo-agent/panel';
-import { notifyChanged, workspace } from '../../workspace-store';
+import { notifyChanged, workspace } from '../../../workspace-store';
 
 function seed(sessions: WorkspaceSessionInfo[], active: string | null = null, team = 'EchoCode') {
   workspace.sessions = sessions;

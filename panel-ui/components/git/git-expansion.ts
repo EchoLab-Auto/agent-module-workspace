@@ -16,7 +16,7 @@
 
 import { ref } from 'vue';
 import type { WorkspaceGitInfo } from '@echo-agent/panel';
-import { AUTO_OPEN_TOTAL, changedCount, conflictCount, countOf, type ChangeKind } from './git-changes';
+import { AUTO_OPEN_TOTAL, changedCount, conflictCount, countOf, type ChangeKind } from '../../git-changes';
 
 /** 类别开关的键（同一个目录内按类别区分；多个目录可同开）。 */
 function groupKey(directory: string, kind: ChangeKind): string {

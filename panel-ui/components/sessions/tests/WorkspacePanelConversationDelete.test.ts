@@ -39,14 +39,14 @@ import WorkspacePanel from '../WorkspacePanel.vue';
 import { sendCommand } from '@echo-agent/panel';
 import type { WorkspaceSessionInfo } from '@echo-agent/panel';
 import { state } from '@echo-agent/panel';
-import { notifyChanged, workspace } from '../../workspace-store';
+import { notifyChanged, workspace } from '../../../workspace-store';
 import {
   DELETE_CONVERSATION_METHOD,
   DELETE_TIMEOUT_MS,
   MODULE_ID,
   consumeConversationDeleteResult,
   resetConversationDeletes,
-} from '../../workspace-conversation-delete';
+} from '../../../workspace-conversation-delete';
 
 type Command = Record<string, any>;
 

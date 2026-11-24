@@ -389,3 +389,33 @@ export function decideOnWorkspaceBroadcast(p: {
   }
   return { kind: 'keep' };
 }
+
+// ── 激活决策的调试记录 ────────────────────────────────────────────────
+//
+// 多窗口「谁该跳到哪个工作区」的判定一旦出错，现象是"我这边视图被别人的
+// 操作抢走了"，而这种时序问题**无法在事后重放**——必须在决策发生的那一刻
+// 把输入与结论都记下来。只留最近 20 条（够复盘一次操作序列），挂在
+// `window.__echoPanelWorkspaceLog` 上供控制台取用；不写日志通道、不打点，
+// 因为这是给排查用的一次性取证，不该变成常驻开销。
+
+/** 一次激活决策的取证记录。 */
+export interface WorkspaceDecisionRecord {
+  active: string | null;
+  activeConversation: string | null;
+  current: string;
+  mine: boolean;
+  decision: { kind: string; next?: string };
+}
+
+/** 追加一条决策记录（保留最近 20 条）。 */
+export function recordWorkspaceDecision(entry: WorkspaceDecisionRecord): void {
+  const w = window as unknown as { __echoPanelWorkspaceLog?: unknown[] };
+  const log = (w.__echoPanelWorkspaceLog ??= []);
+  log.push({
+    t: new Date().toISOString(),
+    ...entry,
+    decision: entry.decision.kind,
+    next: entry.decision.next ?? null,
+  });
+  if (log.length > 20) log.shift();
+}

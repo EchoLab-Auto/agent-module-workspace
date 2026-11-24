@@ -24,7 +24,7 @@ import { state } from '@echo-agent/panel';
 import { sendCommand } from '@echo-agent/panel';
 import type { WorkspaceGitInfo, WorkspaceSessionInfo } from '@echo-agent/panel';
 //! store 里的 `workspace` 与本文件的工厂函数 `workspace()` 同名，取别名避免遮蔽。
-import { applyGit, resetCaches } from '../../workspace-store';
+import { applyGit, resetCaches } from '../../../workspace-store';
 
 function workspace(over: Partial<WorkspaceSessionInfo> = {}): WorkspaceSessionInfo {
   return {

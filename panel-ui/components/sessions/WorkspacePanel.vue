@@ -31,18 +31,18 @@ import {
   directoryToInput,
   noteLocalActivateIntent,
   workspaceChannelSessionId,
-} from '../workspace';
+} from '../../workspace';
 import DirectoryPicker from './DirectoryPicker.vue';
 import { confirmDialog } from '@echo-agent/panel';
-import { ensureWorkspaceSessions, WORKSPACE_SESSIONS_KEY } from '../workspace-prefetch';
-import { workspace, workspaceRevision } from '../workspace-store';
+import { ensureWorkspaceSessions, WORKSPACE_SESSIONS_KEY } from '../../workspace-prefetch';
+import { workspace, workspaceRevision } from '../../workspace-store';
 import {
   conversationDeleteResult,
   conversationDeleteRevision,
   requestConversationDelete,
   retiredConversationIds,
-} from '../workspace-conversation-delete';
-import { parseWorkspaceJson, sessionToJson } from '../workspace-json';
+} from '../../workspace-conversation-delete';
+import { useSessionJsonForm } from './use-session-json-form';
 
 const props = defineProps<{ teamId: string | null }>();
 
@@ -144,37 +144,38 @@ function finishAction(): void {
 }
 
 // ── JSON 导入 / 编辑（2026-11）──
-// 表单只有名称/描述/目录三样，而落盘字段还包含 conversations（每个对话的
-// api_profile / legacy）与 last_conversation。JSON 段是这条路径的入口：
-// 粘贴 → 解析（`../workspace-json`）→ 回填表单或批量提交。
-// **保存前会自动应用未应用的改动**——否则「贴了 JSON 直接点保存」会静默丢掉
-// JSON 里的内容，这是这条路径最容易踩的坑。
-const formJson = ref('');
-/** 上次生成/应用时的文本：与它不同 = 用户改过 JSON 还没应用。 */
-const jsonBaseline = ref('');
-const jsonError = ref<string | null>(null);
-const jsonNotice = ref<string | null>(null);
-/** 应用 JSON 后携带的对话（`null` = 本次不动既有对话，与表单保存语义一致）。 */
-const formConversations = ref<WorkspaceConversationInfo[] | null>(null);
-const formLastConversation = ref<string | null>(null);
-const jsonDirty = computed(() => formJson.value.trim() !== '' && formJson.value !== jsonBaseline.value);
-
-function resetJsonFeedback(): void {
-  jsonError.value = null;
-  jsonNotice.value = null;
-}
+// 状态与规则在 `use-session-json-form.ts`：粘贴 → 解析（`workspace-json.ts`）
+// → 回填下面三个表单字段，或批量提交。本组件只负责调用与派发命令。
+// **保存前会自动应用未应用的改动**（见 `save`）——否则「贴了 JSON 直接点保存」
+// 会静默丢掉 JSON 里的内容，这是这条路径最容易踩的坑。
+const jsonForm = useSessionJsonForm({
+  editingId: () => editing.value?.id ?? '',
+  formName,
+  formDescription,
+  formDirs,
+  findSession: (id) => sessions.value.find((s) => s.id === id),
+  toInput: directoryToInput,
+});
+/** 解构出的别名与模板/后续逻辑共用（名字沿用改造前的局部变量）。 */
+const {
+  text: formJson,
+  error: jsonError,
+  notice: jsonNotice,
+  dirty: jsonDirty,
+  conversations: formConversations,
+  lastConversation: formLastConversation,
+  resetFeedback: resetJsonFeedback,
+  clear: clearJson,
+  seed: seedJson,
+} = jsonForm;
 
 function startCreate() {
   editing.value = { id: '' };
   formName.value = '';
   formDescription.value = '';
   formDirs.value = '';
-  formConversations.value = null;
-  formLastConversation.value = null;
-  formJson.value = '';
-  jsonBaseline.value = '';
+  clearJson();
   actionNotice.value = null;
-  resetJsonFeedback();
 }
 
 function startEdit(session: WorkspaceSessionInfo) {
@@ -185,12 +186,8 @@ function startEdit(session: WorkspaceSessionInfo) {
   // （此前直接 join 会把对象变成 "[object Object]"）。
   formDirs.value = (session.directories ?? []).map(directoryToInput).join('\n');
   // 对话不进表单（表单只有三个字段），但 JSON 段以它为初始内容。
-  formConversations.value = null;
-  formLastConversation.value = null;
-  formJson.value = sessionToJson(session);
-  jsonBaseline.value = formJson.value;
+  seedJson(session);
   actionNotice.value = null;
-  resetJsonFeedback();
 }
 
 function cancelEdit() {
@@ -198,66 +195,11 @@ function cancelEdit() {
   resetJsonFeedback();
 }
 
-/** 把编辑中的会话重新生成为 JSON（丢弃文本改动）。 */
-function resetJson() {
-  const existing = editing.value ? sessions.value.find((s) => s.id === editing.value!.id) : undefined;
-  formJson.value = existing ? sessionToJson(existing) : '';
-  jsonBaseline.value = formJson.value;
-  formConversations.value = null;
-  formLastConversation.value = null;
-  resetJsonFeedback();
-}
+/** 把编辑中的会话重新生成为 JSON（丢弃文本改动）；规则在 composable 内。 */
+const resetJson = jsonForm.reset;
 
-/**
- * 解析当前 JSON 文本并回填表单。返回可提交的会话数组（失败 → null，
- * 原因已写进 `jsonError`）。
- *
- * 新建：允许 1..N 份（N>1 = 批量导入，`save` 逐条发命令）。
- * 编辑：只允许 1 份，且 id 必须与正在编辑的一致——改 id 等于「另建一份」，
- * 会留下一条指向旧 id 的孤儿记录。
- */
-function applyJson(): WorkspaceSessionInfo[] | null {
-  resetJsonFeedback();
-  const parsed = parseWorkspaceJson(formJson.value);
-  if (!parsed.ok) {
-    jsonError.value = parsed.error;
-    return null;
-  }
-  const editingId = editing.value?.id ?? '';
-  if (editingId) {
-    if (parsed.sessions.length !== 1) {
-      jsonError.value = `编辑时只能有一份工作区（当前 ${parsed.sessions.length} 份）`;
-      return null;
-    }
-    const only: WorkspaceSessionInfo = { ...parsed.sessions[0], id: editingId };
-    if (parsed.sessions[0].id && parsed.sessions[0].id !== editingId) {
-      jsonError.value = `编辑时不能修改工作区 id（当前「${editingId}」，JSON 里是「${parsed.sessions[0].id}」）`;
-      return null;
-    }
-    formName.value = only.name;
-    formDescription.value = only.description ?? '';
-    formDirs.value = (only.directories ?? []).map(directoryToInput).join('\n');
-    formConversations.value = only.conversations ?? null;
-    formLastConversation.value = only.last_conversation ?? null;
-    jsonBaseline.value = formJson.value;
-    jsonNotice.value = parsed.document && parsed.active
-      ? `已应用 JSON（文档里的 active「${parsed.active}」不随保存写入，激活请在列表里点）`
-      : '已应用 JSON（点「保存」生效）';
-    return [only];
-  }
-  // 新建：回填第一份，让用户看到即将创建什么。
-  const first = parsed.sessions[0];
-  formName.value = first.name;
-  formDescription.value = first.description ?? '';
-  formDirs.value = (first.directories ?? []).map(directoryToInput).join('\n');
-  formConversations.value = first.conversations ?? null;
-  formLastConversation.value = first.last_conversation ?? null;
-  jsonBaseline.value = formJson.value;
-  jsonNotice.value = parsed.sessions.length > 1
-    ? `已解析 ${parsed.sessions.length} 份工作区，保存后批量导入`
-    : '已解析 1 份工作区（点「保存」创建）';
-  return parsed.sessions;
-}
+/** 解析当前文本并回填表单；规则与校验在 composable 内（含编辑态 id 不可改）。 */
+const applyJson = jsonForm.apply;
 
 function applyJsonFromButton(): void {
   applyJson();
@@ -602,7 +544,7 @@ watch(
       </label>
       <!-- JSON 导入 / 编辑（2026-11）：表单填不了 conversations / api_profile /
            last_conversation；迁移或复制既有工作区时用户手上正好是一段落盘
-           JSON，这里直接接收（三种形态见 `../workspace-json`）。
+           JSON，这里直接接收（三种形态见 `workspace-json.ts`）。
            默认折叠：日常建一个工作区只用上面三个字段，不该被 20 行 JSON 干扰。 -->
       <details class="ws-json">
         <summary class="ws-json__summary">

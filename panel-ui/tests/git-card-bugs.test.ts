@@ -24,7 +24,7 @@ vi.mock('@echo-agent/panel', async (importOriginal) => {
   return { ...actual, startConnection: vi.fn(), sendCommand: vi.fn(), sendPending: vi.fn() };
 });
 
-import WorkspaceGitCard from '../components/WorkspaceGitCard.vue';
+import WorkspaceGitCard from '../components/git/WorkspaceGitCard.vue';
 import { dispatch, sendCommand, state } from '@echo-agent/panel';
 import type { WorkspaceGitInfo, WorkspaceSessionInfo } from '@echo-agent/panel';
 import { applyGit, resetCaches } from '../workspace-store';

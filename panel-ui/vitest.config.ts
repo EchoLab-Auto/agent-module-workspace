@@ -76,7 +76,7 @@ export default defineConfig({
   server: { fs: { allow: [here, PANEL_SOURCE] } },
   test: {
     environment: 'happy-dom',
-    include: ['tests/**/*.test.ts', 'components/tests/**/*.test.ts'],
+    include: ['tests/**/*.test.ts', 'components/**/tests/**/*.test.ts'],
     server: { deps: { inline: [/@echolab-auto/] } },
   },
 });

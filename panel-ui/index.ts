@@ -13,9 +13,9 @@ import {
   type PanelAppContext,
   type WorkspaceSessionInfo,
 } from '@echo-agent/panel';
-import WorkspacePanel from './components/WorkspacePanel.vue';
-import WorkspaceFilesRail from './components/WorkspaceFilesRail.vue';
-import WorkspaceGitCard from './components/WorkspaceGitCard.vue';
+import WorkspacePanel from './components/sessions/WorkspacePanel.vue';
+import WorkspaceFilesRail from './components/files/WorkspaceFilesRail.vue';
+import WorkspaceGitCard from './components/git/WorkspaceGitCard.vue';
 import { ensureWorkspaceSessions } from './workspace-prefetch';
 import { changedCount, conflictCount } from './git-changes';
 import {
@@ -24,6 +24,7 @@ import {
   localSessionProjection,
   noteLocalActivateIntent,
   parseWorkspaceChannelId,
+  recordWorkspaceDecision,
   hasRecentLocalActivateIntent,
   takeLocalActivateIntent,
   workspacePickIntent,
@@ -57,19 +58,6 @@ function sendWorkspaceActivate(context: PanelAppContext, id: string | null, conv
       conversation: id ? conversation : undefined,
     },
   });
-}
-
-function recordWorkspaceDecision(entry: {
-  active: string | null;
-  activeConversation: string | null;
-  current: string;
-  mine: boolean;
-  decision: { kind: string; next?: string };
-}): void {
-  const w = window as unknown as { __echoPanelWorkspaceLog?: unknown[] };
-  const log = (w.__echoPanelWorkspaceLog ??= []);
-  log.push({ t: new Date().toISOString(), ...entry, decision: entry.decision.kind, next: entry.decision.next ?? null });
-  if (log.length > 20) log.shift();
 }
 
 function setup(context: PanelAppContext): void {
