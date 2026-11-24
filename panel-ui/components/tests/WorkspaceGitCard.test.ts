@@ -73,6 +73,22 @@ function gitCalls() {
     );
 }
 
+/** 本次测试里发出的 fetch 请求（与 `gitCalls` 分开：两条命令各自独立）。 */
+function fetchCalls() {
+  return vi
+    .mocked(sendCommand)
+    .mock.calls.map((c) => c[0])
+    .filter(
+      (c): c is {
+        FetchWorkspaceGit: {
+          team_id?: string | null;
+          session_id: string;
+          directories?: string[] | null;
+        };
+      } => typeof c === 'object' && c !== null && 'FetchWorkspaceGit' in c,
+    );
+}
+
 describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
   beforeEach(() => {
     vi.mocked(sendCommand).mockClear();
@@ -121,6 +137,9 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
       info({
         directory: '/home/evence/code_file/gitlab/echo-tech/ui-frame',
         branch: 'main',
+        // 有上游才有 ahead/behind 可言：没有上游时箭头**不显示**（2026-11
+        // 起，见 `syncTip`）——那时两个数字恒为 0，画出来会被读成"已同步"。
+        upstream: 'origin/main',
         ahead: 2,
         behind: 1,
         staged: 1,
@@ -703,6 +722,118 @@ describe('WorkspaceGitCard（工作区 git 状态卡）', () => {
     const calls = gitCalls();
     expect(calls[calls.length - 1].RequestWorkspaceGitStatus.directories).toBeUndefined();
     wrapper.unmount();
+  });
+
+  /**
+   * 「获取远端」与「刷新」是**两条命令**（2026-11）。
+   *
+   * 现场：`origin` 指向的镜像挂了几天，`origin/main` 停在旧提交，卡片一直
+   * 显示 ↑5，而远端其实早就收到了。根因是 ahead/behind 算的是 HEAD 与**本地
+   * 记录的远端**之差，而那条记录只有 `git fetch` 才更新——卡片此前没有任何
+   * fetch 入口，于是那个数字永远无法自愈。
+   */
+  describe('获取远端（git fetch）', () => {
+    it('点「获取远端」发的是 FetchWorkspaceGit（不是 RequestWorkspaceGitStatus）', async () => {
+      const wrapper = mountWith([info({ directory: '/srv/a', branch: 'main', upstream: 'origin/main' })]);
+      await nextTick();
+      const beforeGit = gitCalls().length;
+      await wrapper.find('.wgc-fetch').trigger('click');
+      const calls = fetchCalls();
+      expect(calls.length).toBe(1);
+      expect(calls[0].FetchWorkspaceGit.directories).toEqual(['/srv/a']);
+      // 只发 fetch：回包本身就是刷新后的快照，不需要再发一次采集。
+      expect(gitCalls().length).toBe(beforeGit);
+      wrapper.unmount();
+    });
+
+    it('fetch 期间只有本目录的 fetch 按钮转圈，刷新按钮不受影响', async () => {
+      const wrapper = mountWith([info({ directory: '/srv/a', branch: 'main', upstream: 'origin/main' })]);
+      await nextTick();
+      await wrapper.find('.wgc-fetch').trigger('click');
+      expect(wrapper.find('.wgc-fetch').attributes('aria-label')).toBe('正在获取远端');
+      expect(wrapper.find('.wgc-fetch').attributes('aria-disabled')).toBe('true');
+      expect(wrapper.find('.wgc-fetch__spin').exists()).toBe(true);
+      expect(wrapper.find('.wgc-refresh').attributes('aria-label')).toBe('只刷新这个目录的 git 状态');
+      wrapper.unmount();
+    });
+
+    it('快照回来即收掉 fetch 忙碌态（不永久转圈）', async () => {
+      const wrapper = mountWith([info({ directory: '/srv/a', branch: 'main', upstream: 'origin/main' })]);
+      await nextTick();
+      await wrapper.find('.wgc-fetch').trigger('click');
+      seed([info({ directory: '/srv/a', branch: 'main', upstream: 'origin/main', ahead: 0 })]);
+      await nextTick();
+      expect(wrapper.find('.wgc-fetch').attributes('aria-label')).toBe('获取远端（git fetch）');
+      expect(wrapper.find('.wgc-fetch__spin').exists()).toBe(false);
+      wrapper.unmount();
+    });
+
+    /**
+     * 跨机目录（`node://`）不出现这个按钮：fetch 要在对端跑，这一版不支持。
+     * 给一个点了没用的按钮比不给更糟。
+     */
+    it('跨机目录不显示「获取远端」', async () => {
+      const wrapper = mountWith([
+        info({ directory: 'node://peer/srv/a', branch: 'main', upstream: 'origin/main' }),
+      ]);
+      await nextTick();
+      expect(wrapper.find('.wgc-fetch').exists()).toBe(false);
+      expect(wrapper.find('.wgc-refresh').exists()).toBe(true);
+      wrapper.unmount();
+    });
+  });
+
+  /**
+   * 箭头与「基准」标签（2026-11）。
+   *
+   * 没有上游时不显示箭头：那时 ahead/behind 恒为 0，画出来会被读成"和远端
+   * 同步了"。基准过旧时箭头加 `--stale` 样式（描边灰 + 点线下划线），并在
+   * meta 行里显式写「基准 N 小时前」。
+   */
+  describe('箭头与基准', () => {
+    it('没有上游 → 不显示箭头', async () => {
+      const wrapper = mountWith([info({ branch: 'main', ahead: 5, behind: 0 })]);
+      await nextTick();
+      expect(wrapper.find('.wgc-sync').exists()).toBe(false);
+      wrapper.unmount();
+    });
+
+    it('有上游 + 有领先 → 显示箭头，且悬停提示带基准时刻', async () => {
+      const now = Math.floor(Date.now() / 1000);
+      const wrapper = mountWith([
+        info({ branch: 'main', upstream: 'origin/main', ahead: 5, fetched_at: now - 60 }),
+      ]);
+      await nextTick();
+      const chip = wrapper.find('.wgc-sync');
+      expect(chip.exists()).toBe(true);
+      expect(chip.text()).toContain('5');
+      const title = chip.attributes('title') ?? '';
+      expect(title).toContain('领先 5 个提交');
+      // 一分钟前获取的基准：说得出时间，且不标 stale
+      expect(title).toContain('1 分钟前');
+      expect(chip.classes()).not.toContain('wgc-sync--stale');
+      wrapper.unmount();
+    });
+
+    it('基准过旧 → 箭头带 stale 样式，meta 行写出「基准 N 小时前」', async () => {
+      const now = Math.floor(Date.now() / 1000);
+      const wrapper = mountWith([
+        info({ branch: 'main', upstream: 'origin/main', ahead: 5, fetched_at: now - 3 * 3600 }),
+      ]);
+      await nextTick();
+      expect(wrapper.find('.wgc-sync').classes()).toContain('wgc-sync--stale');
+      // 单目录默认展开（`git-expansion` 的 AUTO_OPEN_TOTAL），不用点。
+      expect(wrapper.find('.wgc-meta__basis').text()).toContain('3 小时前');
+      wrapper.unmount();
+    });
+
+    it('从未 fetch（无 fetched_at）→ 已过旧，且提示说"时间未知"', async () => {
+      const wrapper = mountWith([info({ branch: 'main', upstream: 'origin/main', ahead: 2 })]);
+      await nextTick();
+      expect(wrapper.find('.wgc-sync').classes()).toContain('wgc-sync--stale');
+      expect(wrapper.find('.wgc-sync').attributes('title')).toContain('时间未知');
+      wrapper.unmount();
+    });
   });
 
   it('单目录刷新的忙碌态在快照到达后收掉（不永久转圈）', async () => {

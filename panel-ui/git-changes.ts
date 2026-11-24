@@ -345,6 +345,71 @@ export function relativeTime(iso: string | null | undefined, now = Date.now()): 
 }
 
 /**
+ * `fetched_at`（unix 秒）的相对说法。
+ *
+ * 与 [`relativeTime`] 分开是因为输入不同（那个吃 RFC 3339 字符串）——把秒数
+ * 拼成 ISO 再解析一遍只会多两处出错的机会。取不到 / 非法 → `null`，调用方
+ * 不显示，而不是编一个"刚刚"。
+ */
+export function fetchedAgo(
+  fetchedAt: number | null | undefined,
+  now = Date.now(),
+): string | null {
+  if (!fetchedAt || fetchedAt <= 0) return null;
+  const seconds = Math.round(now / 1000 - fetchedAt);
+  // 时钟偏差：远端时间在"未来"时不说负数。
+  if (seconds < 0) return '刚刚';
+  if (seconds < 60) return '刚刚';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  return `${days} 天前`;
+}
+
+/**
+ * `ahead` / `behind` 的悬停说明。
+ *
+ * ## 为什么必须带上"基准时刻"
+ *
+ * 这两个数字是 `HEAD` 与**本地记录的远端**（`origin/main`）之差，而那条记录
+ * 只有 `git fetch` 才更新。只写「领先上游 5 个提交」会让人读成「5 个提交没推
+ * 上去」——2026-11 的现场就是这样：`origin` 指向的镜像挂了几天，`origin/main`
+ * 停在旧提交，卡片一直显示 ↑5，而远端其实早就收到了。
+ *
+ * 返回 `null` = 没有上游（调用方不显示箭头）。没有上游时 `ahead`/`behind`
+ * 恒为 0，显示出来只会让人以为"和远端同步了"。
+ */
+export function syncTip(dir: WorkspaceGitInfo, now = Date.now()): string | null {
+  if (!dir.upstream) return null;
+  if (!dir.ahead && !dir.behind) return null;
+  const bits: string[] = [];
+  if (dir.ahead) bits.push(`领先 ${dir.ahead} 个提交`);
+  if (dir.behind) bits.push(`落后 ${dir.behind} 个提交`);
+  const ago = fetchedAgo(dir.fetched_at, now);
+  // 基准时刻取不到（老 Core / 从没 fetch 过）：明说，别让人以为这是实时的。
+  const basis = ago ? `相对于 ${ago}获取的远端` : '相对于上次获取的远端（时间未知）';
+  return `${bits.join('、')}，${basis}。
+点「获取远端」可刷新这个基准。`;
+}
+
+/**
+ * `ahead`/`behind` 的基准是否已经旧到需要提醒。
+ *
+ * 一小时：短于它的一次 fetch 通常还在"我刚推过/刚拉过"的心理窗口内；长于它
+ * 的数字已经不能作为"有没有未推送"的依据了。
+ */
+export const SYNC_STALE_AFTER_MS = 60 * 60 * 1000;
+
+/** 基准是否过旧（`fetched_at` 缺失按过旧算：从没 fetch 过就更不可信）。 */
+export function syncStale(dir: WorkspaceGitInfo, now = Date.now()): boolean {
+  if (!dir.upstream) return false;
+  if (!dir.fetched_at) return true;
+  return now - dir.fetched_at * 1000 > SYNC_STALE_AFTER_MS;
+}
+
+/**
  * 快照里"值得看一眼"的附加信息，拼成一行：`stash 2 · 3 小时前`。
  *
  * stash 与提交时间都是**补充信息**：没有就什么都不显示（不占位置），

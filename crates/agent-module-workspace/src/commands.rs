@@ -38,12 +38,13 @@ use crate::ModuleState;
 /// 现在跨了仓库边界，只能经命令通道回来。最后 2 条是**模块私有方法**
 /// （[`OVERVIEW`] / [`DELETE_CONVERSATION`]）：面板经通用调用通道点名调用，
 /// 宿主协议不新增变体。
-pub const COMMANDS: [&str; 11] = [
+pub const COMMANDS: [&str; 12] = [
     REQUEST_SESSIONS,
     SAVE_SESSION,
     DELETE_SESSION,
     ACTIVATE_SESSION,
     REQUEST_GIT_STATUS,
+    FETCH_GIT,
     REQUEST_FILES,
     REQUEST_BROWSE_DIRECTORIES,
     // ── 宿主内部命令（见模块文档）──
@@ -67,6 +68,14 @@ pub const DELETE_SESSION: &str = "DeleteWorkspaceSession";
 pub const ACTIVATE_SESSION: &str = "ActivateWorkspaceSession";
 /// 面板请求：工作区 git 状态。
 pub const REQUEST_GIT_STATUS: &str = "RequestWorkspaceGitStatus";
+/// 面板请求：让工作区目录执行 `git fetch`，然后回一份刷新后的 git 状态。
+///
+/// 与 [`REQUEST_GIT_STATUS`] **分成两条命令**（而不是给它加一个 `fetch: true`
+/// 开关）：那条是纯读（本地子进程、5s 封顶），这条会连远端、改
+/// `.git/FETCH_HEAD`（45s 封顶）。混在一起的三个后果见 Core 侧
+/// `BackendCommand::FetchWorkspaceGit` 的文档——最实际的一条是只读面板身份
+/// 会连带获得网络写能力。
+pub const FETCH_GIT: &str = "FetchWorkspaceGit";
 /// 面板请求：工作区文件列表。
 pub const REQUEST_FILES: &str = "RequestWorkspaceFiles";
 /// 面板请求：可浏览的目录根。
@@ -124,6 +133,7 @@ pub async fn handle(
         "DeleteWorkspaceSession" => delete_session(state, team_id.as_deref(), &payload),
         "ActivateWorkspaceSession" => activate_session(state, team_id.as_deref(), &payload),
         "RequestWorkspaceGitStatus" => git_status(state, team_id.as_deref(), &payload).await,
+        "FetchWorkspaceGit" => fetch_git(state, team_id.as_deref(), &payload).await,
         "RequestWorkspaceFiles" => files_list(state, team_id.as_deref(), &payload).await,
         "RequestBrowseDirectories" => browse(state, &payload).await,
         "WorkspaceSetConversationApiProfile" => {
@@ -513,6 +523,123 @@ async fn git_status(
         let collected = handle.await.map_err(|e| format!("git 采集失败: {e}"))?;
         for ((index, _), info) in local.into_iter().zip(collected) {
             results[index] = Some(info);
+        }
+    }
+    let directories: Vec<WorkspaceGitInfo> = results.into_iter().flatten().collect();
+    state.emit_backend(json!({
+        "WorkspaceGitStatus": {
+            "team_id": team_id,
+            "session_id": workspace_id,
+            "directories": directories,
+        }
+    }));
+    Ok(Value::Null)
+}
+
+/// 让选定目录执行 `git fetch`，然后回一份**刷新后**的 git 状态。
+///
+/// ## 为什么回的是同一条 `WorkspaceGitStatus`
+///
+/// 面板的 `applyGit` 已经按目录合并这个事件（2026-11 审计 B1 改的）。复用
+/// 它意味着 fetch 之后**不需要**任何新的 reducer、也不会出现"fetch 回来了但
+/// 箭头还是旧的、要再点一次刷新"。代价是这条事件对面板而言不可区分（不知道
+/// 是采集来的还是 fetch 后采集来的）——这正是我们要的：`ahead`/`behind` 的
+/// 语义在两种情况下完全一样。
+///
+/// ## 跨机目录
+///
+/// 对端执行 fetch 需要一条新的联邦查询类型（`QueryKind`），那是协议面改动。
+/// 这一版**跳过**远程目录并在该目录的 `error` 里写明原因：静默跳过会让用户
+/// 以为"fetch 过了、确实没有新提交"，而实际上根本没连。
+pub async fn fetch_git(
+    state: &ModuleState,
+    team_id: Option<&str>,
+    payload: &Value,
+) -> Result<Value, String> {
+    let store = store_or_err(state, team_id)?;
+    let workspace_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "FetchWorkspaceGit 缺少 session_id".to_string())?
+        .to_string();
+    let Some(session) = store.get(&workspace_id) else {
+        let message = format!("工作区会话 {workspace_id} 不存在");
+        state.emit_error(team_id, message.clone());
+        return Err(message);
+    };
+    let only: Option<Vec<String>> = payload.get("directories").and_then(|value| {
+        value
+            .as_array()
+            .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+    });
+    let directories = select_directories(&session.directories, only.as_deref());
+
+    // fetch 是阻塞子进程（最多 45s × N 个目录）：整段丢进 `spawn_blocking`，
+    // 不占 tokio 的工作线程。逐目录串行而不是并发——它们通常指向**同一个**
+    // 远端，并发 fetch 会在服务端排队，而串行至少能让第一个先回来。
+    let local: Vec<String> = directories
+        .iter()
+        .filter(|dir| dir.node().is_none())
+        .map(|dir| dir.path().to_string())
+        .collect();
+    let mut failures: HashMap<String, String> = HashMap::new();
+    if !local.is_empty() {
+        let fetched = tokio::task::spawn_blocking(move || {
+            local
+                .into_iter()
+                .map(|path| {
+                    let outcome = crate::git::fetch_dir(&path);
+                    (path, outcome)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|e| format!("git fetch 执行失败: {e}"))?;
+        for (path, outcome) in fetched {
+            if !outcome.is_empty() {
+                failures.insert(path, outcome);
+            }
+        }
+    }
+
+    // 无论 fetch 成败都重新采集一次状态：失败时用户至少能看到 `.git` 的现状，
+    // 成功时 ahead/behind 立刻变成新值。
+    let mut results: Vec<Option<WorkspaceGitInfo>> = vec![None; directories.len()];
+    let collector: Vec<String> = directories
+        .iter()
+        .filter(|dir| dir.node().is_none())
+        .map(|dir| dir.path().to_string())
+        .collect();
+    if !collector.is_empty() {
+        let collected = tokio::task::spawn_blocking(move || {
+            collector
+                .iter()
+                .map(|path| crate::git::collect_dir_git(path))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|e| format!("git 采集失败: {e}"))?;
+        let mut iter = collected.into_iter();
+        for (index, dir) in directories.iter().enumerate() {
+            if dir.node().is_none() {
+                results[index] = iter.next();
+            }
+        }
+    }
+    // 跨机目录**整条不发**（不是发一个失败占位）。
+    //
+    // 发占位会把一个本来正常的跨机目录显示成红行、并丢掉它已有的状态；而
+    // 「没做 fetch」这件事对用户的意义只是"那条路上的 ahead/behind 仍是旧
+    // 基准"，这句话该由**面板**说——它才知道哪些目录是 `node://`，也才能把
+    // 提示收成一条 toast 而不是在每个目录上行红字。
+    // fetch 失败的原因盖在采集结果上：采集成功也可能同时"没能连上远端"，
+    // 而后者才是用户点这个按钮的原因。`error` 字段本来就是这么用的
+    // （目录存在但不是仓库时也走它）。
+    for (index, dir) in directories.iter().enumerate() {
+        if let Some(reason) = failures.get(dir.path()) {
+            if let Some(Some(info)) = results.get_mut(index) {
+                info.error = Some(format!("git fetch 失败：{reason}"));
+            }
         }
     }
     let directories: Vec<WorkspaceGitInfo> = results.into_iter().flatten().collect();
@@ -1327,6 +1454,7 @@ mod command_name_tests {
             DELETE_SESSION,
             ACTIVATE_SESSION,
             REQUEST_GIT_STATUS,
+            FETCH_GIT,
             REQUEST_FILES,
             REQUEST_BROWSE_DIRECTORIES,
             SET_CONVERSATION_API_PROFILE,

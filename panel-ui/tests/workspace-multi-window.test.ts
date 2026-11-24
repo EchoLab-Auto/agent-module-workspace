@@ -28,6 +28,11 @@ vi.mock('@echo-agent/panel', async (importOriginal) => {
 });
 
 import App from '@echo-agent/panel/App';
+// 扩展**必须显式导入**（2026-11 起）：App.vue 不再在 import 期加载任何扩展
+// ——UI 现在是运行期加载的（`extension-loader` 拉清单后 `import()`），所以
+// 测试要模拟那一步，否则注册表是空的、`acceptEvent` 钩子不装，广播不会进
+// `workspace-store`（`workspace.active` 一直是 null）。
+import '../index';
 import { state } from '@echo-agent/panel';
 import { dispatch } from '@echo-agent/panel';
 import {

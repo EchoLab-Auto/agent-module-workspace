@@ -8,8 +8,15 @@ use std::time::{Duration, Instant};
 
 use crate::wire::{WorkspaceChangedEntry, WorkspaceGitInfo};
 
-/// 单次 `git` 调用的硬超时。
+/// 单次**本地** `git` 调用的硬超时（`rev-parse` / `status` / `log` 这类）。
 pub const GIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 单次 `git fetch` 的硬超时。
+///
+/// 45s 而不是 [`GIT_TIMEOUT`]：fetch 真的会连远端，弱网或大仓库（首次拉几万
+/// 个对象）下 5s 必然误判。仍然要有上限——没有上限时一个挂住的对端会把
+/// 面板的「获取远端」永远转下去，而用户看不到任何进度。
+pub const GIT_FETCH_TIMEOUT: Duration = Duration::from_secs(45);
 /// 每类变更明细的条数上限（已暂存 / 已修改 / 未跟踪**各算**）。
 pub const CHANGED_FILES_CAP: usize = 30;
 
@@ -22,9 +29,19 @@ enum GitOutcome {
     Unavailable(String),
 }
 
+/// Run `git -C <dir> <args…>` with the default [`GIT_TIMEOUT`].
+fn run_git(dir: &str, args: &[&str]) -> GitOutcome {
+    run_git_with_timeout(dir, args, GIT_TIMEOUT)
+}
+
 /// Run `git -C <dir> <args…>` with a hard timeout. Stdout/stderr are drained
 /// on dedicated threads so a verbose command cannot deadlock on a full pipe.
-fn run_git(dir: &str, args: &[&str]) -> GitOutcome {
+///
+/// 超时可传入而不是写死：本地采集（`rev-parse` / `status`）几十毫秒，5s 足够
+/// 且卡住要立刻放弃；而 `git fetch` 真的会连远端——同一个 5s 会把弱网下的
+/// 正常 fetch 误判成超时。两者共用一个实现（同样的排空与 kill 语义），只差
+/// 时间窗。
+fn run_git_with_timeout(dir: &str, args: &[&str], timeout: Duration) -> GitOutcome {
     let mut child = match Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -59,7 +76,7 @@ fn run_git(dir: &str, args: &[&str]) -> GitOutcome {
         buf
     });
 
-    let deadline = Instant::now() + GIT_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
@@ -71,7 +88,7 @@ fn run_git(dir: &str, args: &[&str]) -> GitOutcome {
                     let _ = err_reader.join();
                     return GitOutcome::Unavailable(format!(
                         "git 命令超时（>{}s）",
-                        GIT_TIMEOUT.as_secs()
+                        timeout.as_secs()
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(20));
@@ -85,6 +102,63 @@ fn run_git(dir: &str, args: &[&str]) -> GitOutcome {
         Some(status) if status.success() => GitOutcome::Ok(stdout),
         Some(_) => GitOutcome::Failed(stderr.trim().to_string()),
         None => GitOutcome::Unavailable("git 未返回状态".into()),
+    }
+}
+
+/// `FETCH_HEAD` 的修改时间（unix 秒）。文件不存在 / 读不到 → `None`。
+///
+/// 只读元数据，不看内容（内容里可能有远端 URL 与凭据形态的东西）。
+fn fetch_head_mtime_secs(path: &std::path::Path) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
+}
+
+/// 对一个目录执行 `git fetch`（**写**操作：连远端、更新 `.git/FETCH_HEAD`）。
+///
+/// 返回人读结果：成功为空串，失败为原因。
+///
+/// ## 为什么用 `fetch --all --prune` 之外的保守组合
+///
+/// 固定 `--all` + `--prune` 会**删除**远端已删的追踪分支——那是用户的仓库
+/// 拓扑，不该由面板的一个刷新按钮替他们决定。这里只 fetch **当前分支的上游**
+/// （`@{upstream}` 存在时）或默认远端（`git fetch` 不带参数），并把 `--prune`
+/// 留给用户自己在终端决定。
+///
+/// `--quiet`：fetch 的进度输出走 stderr，几十行 "Receiving objects" 会被
+/// [`run_git_with_timeout`] 原样塞进失败原因里（它对非零退出码取 stderr），
+/// 而成功时我们又不看它。静默更干净。
+pub fn fetch_dir(directory: &str) -> String {
+    match run_git_with_timeout(
+        directory,
+        &["fetch", "--quiet"],
+        GIT_FETCH_TIMEOUT,
+    ) {
+        GitOutcome::Ok(_) => String::new(),
+        // 没有配远端（纯本地仓库）是**常态**而不是错误：说清楚，别让用户
+        // 以为 fetch 坏了。
+        GitOutcome::Failed(stderr) => summarize_fetch_failure(&stderr),
+        GitOutcome::Unavailable(message) => message,
+    }
+}
+
+/// 把 `git fetch` 的 stderr 收敛成一句人读原因。
+///
+/// 原始 stderr 在两处会很长：SSH 的横幅 + 重试链、镜像站的重定向说明。
+/// 面板的悬停提示只放得下一两句，所以取第一条非空行；真正的细节仍在
+/// `git fetch` 的终端里可复现（这是"面板给人指向"而不是"面板替代终端"）。
+fn summarize_fetch_failure(stderr: &str) -> String {
+    let first = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("git fetch 失败（git 未给出原因）");
+    if first.contains("no remote") || first.contains("does not appear to be a git repository") {
+        format!("没有可获取的远端：{first}")
+    } else {
+        first.to_string()
     }
 }
 
@@ -122,6 +196,35 @@ pub fn collect_dir_git(directory: &str) -> WorkspaceGitInfo {
         let branch = out.trim();
         if !branch.is_empty() {
             info.branch = Some(branch.to_string());
+        }
+    }
+    // 上游全名（`origin/main`）。无上游时 git 退出非零 → 保持 None：
+    // 面板据此不显示箭头，而不是显示一对恒为 0 的无意义数字。
+    if let GitOutcome::Ok(out) =
+        run_git(directory, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+    {
+        let name = out.trim();
+        if !name.is_empty() && name != "@{upstream}" {
+            info.upstream = Some(name.to_string());
+        }
+    }
+    // `ahead`/`behind` 的基准时刻 = `.git/FETCH_HEAD` 的 mtime。
+    //
+    // 用文件时间而不是"上次我们跑 fetch 的时间"：面板重启、命令行手工 fetch、
+    // 别的工具 fetch 都会更新这个文件，而模块自己记的时间只知道自己做过什么。
+    // `--git-dir` 而不是拼 `<dir>/.git`：worktree / submodule 的 git 目录不在
+    // 工作树里（`.git` 是一行文本指针）。
+    if info.upstream.is_some() {
+        if let GitOutcome::Ok(out) = run_git(directory, &["rev-parse", "--git-dir"]) {
+            let git_dir = out.trim();
+            if !git_dir.is_empty() {
+                let path = if std::path::Path::new(git_dir).is_absolute() {
+                    std::path::PathBuf::from(git_dir)
+                } else {
+                    std::path::Path::new(directory).join(git_dir)
+                };
+                info.fetched_at = fetch_head_mtime_secs(&path.join("FETCH_HEAD"));
+            }
         }
     }
     // 相对上游的领先/落后（无上游时此命令失败，保持 0/0）。

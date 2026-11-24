@@ -67,6 +67,18 @@ let dirTimer: number | undefined;
 const refreshingDirs = ref<Set<string>>(new Set());
 
 /**
+ * 单目录 `git fetch` 中（与 `refreshingDirs` 分开）。
+ *
+ * 为什么不复用同一个集合：两件事的耗时差一个量级（本地采集几十毫秒 / fetch
+ * 连远端可能几十秒），合并成一个转圈会让"刷新"看起来变慢，也会让 8s 的收敛
+ * 计时器在 fetch 上误报超时。
+ */
+const fetchingDirs = ref<Set<string>>(new Set());
+/** fetch 的兜底计时器：Core 侧每个目录最多 45s，这里留一点余量。 */
+let fetchTimer: number | undefined;
+const FETCH_TIMEOUT_MS = 50_000;
+
+/**
  * 本次整卡刷新是否在等"任何一个回包"。
  *
  * 首拉时 `dirs` 还是空的，没有目录名可以逐个比对——此时只要求"收到了回包"。
@@ -183,6 +195,43 @@ function requestDir(directory: string): void {
 }
 
 /**
+ * 对一个目录执行 `git fetch`（本目录的「获取远端」按钮）。
+ *
+ * ## 为什么回包不用另立一条事件
+ *
+ * 模块 fetch 完之后发的是**同一条** `WorkspaceGitStatus`，面板的 `applyGit`
+ * 按目录合并——所以这里只要把该目录的当前序号钉住，回包一推进就收掉转圈，
+ * 而且 `↑/↓` 与 `基准 N 分钟前` 会同时变成新值。
+ *
+ * ## 跨机目录
+ *
+ * 模块不处理（它得在对端跑，这一版不支持），也不会回该目录的快照。所以这里
+ * 根本不发：按钮在跨机目录上不出现（见 `WorkspaceGitDir` 的 `isRemote`）。
+ */
+function requestFetch(directory: string): void {
+  const session = props.session;
+  if (!state.connected || !props.teamId || !session) return;
+  const key = normalizeDir(directory);
+  if (fetchingDirs.value.has(key)) return;
+  fetchingDirs.value = new Set([...fetchingDirs.value, key]);
+  requestedRev.set(key, gitDirRevision(state.activeRegion, props.teamId, session.id, key));
+  sendCommand({
+    FetchWorkspaceGit: {
+      team_id: props.teamId,
+      session_id: session.id,
+      directories: [directory],
+    },
+  });
+  window.clearTimeout(fetchTimer);
+  fetchTimer = window.setTimeout(() => {
+    // 事件丢了也要收敛（否则那个目录的「获取远端」会一直转）。
+    // 文案不在这里给：这个按钮没有 toast 位，转圈停下 + 基准时间没变
+    // 本身就是"没成功"的信号，而具体原因在 `dir.error` 里（模块会填）。
+    fetchingDirs.value = new Set();
+  }, FETCH_TIMEOUT_MS);
+}
+
+/**
  * 快照到达 → 收掉**确实回来了**的那部分忙碌态。
  *
  * 不能"任意回包就清空全部"（2026-11 缺陷）：同时刷新 A、B 两个目录时，B 的
@@ -194,13 +243,25 @@ watch(workspaceRevision, () => {
     awaitingWholeCard = false;
     loading.value = false;
   }
-  if (!refreshingDirs.value.size || !props.session) return;
-  const next = new Set(refreshingDirs.value);
-  for (const dir of next) {
-    const rev = gitDirRevision(state.activeRegion, props.teamId, props.session.id, dir);
-    if (rev > (requestedRev.get(dir) ?? 0)) next.delete(dir);
+  if (!props.session) return;
+  // 两条忙碌态共用同一套"序号是否推进"的判据，但各自收敛：一次 fetch 的回包
+  // 不该把同目录上还在飞的刷新也收掉（反之亦然）。
+  const converge = (busy: Set<string>): Set<string> => {
+    const next = new Set(busy);
+    for (const dir of next) {
+      const rev = gitDirRevision(state.activeRegion, props.teamId, props.session!.id, dir);
+      if (rev > (requestedRev.get(dir) ?? 0)) next.delete(dir);
+    }
+    return next;
+  };
+  if (refreshingDirs.value.size) {
+    const next = converge(refreshingDirs.value);
+    if (next.size !== refreshingDirs.value.size) refreshingDirs.value = next;
   }
-  if (next.size !== refreshingDirs.value.size) refreshingDirs.value = next;
+  if (fetchingDirs.value.size) {
+    const next = converge(fetchingDirs.value);
+    if (next.size !== fetchingDirs.value.size) fetchingDirs.value = next;
+  }
 });
 
 /** 是否只看有变更的目录（多目录时的一屏效率开关）。 */
@@ -275,6 +336,7 @@ watch(
 onBeforeUnmount(() => {
   window.clearTimeout(cardTimer);
   window.clearTimeout(dirTimer);
+  window.clearTimeout(fetchTimer);
 });
 </script>
 
@@ -331,9 +393,11 @@ onBeforeUnmount(() => {
             :open="dir.is_repo && expansion.isRowOpen(dir)"
             :group-open="(kind) => expansion.isGroupOpen(dir, kind)"
             :refreshing="refreshingDirs.has(normalizeDir(dir.directory))"
+            :fetching="fetchingDirs.has(normalizeDir(dir.directory))"
             @toggle-row="expansion.toggleRow(dir)"
             @toggle-group="(kind) => expansion.toggleGroup(dir, kind)"
             @refresh-dir="requestDir(dir.directory)"
+            @fetch-dir="requestFetch(dir.directory)"
           />
         </template>
         <!-- 「只看变更」把所有仓库都滤掉时说一句：此前这里是一片空白，

@@ -18,6 +18,9 @@ import {
   changedCount,
   conflictCount,
   conflictUnknown,
+  fetchedAgo,
+  syncStale,
+  syncTip,
   countOf,
   dirPart,
   displayPath,
@@ -45,6 +48,16 @@ function info(over: Partial<WorkspaceGitInfo> = {}): WorkspaceGitInfo {
 
 function entry(path: string, index: string, worktree: string) {
   return { path, index, worktree };
+}
+
+/** 带上游的目录快照（只有这种才有 ahead/behind 可言）。 */
+function syncInfo(overrides: Partial<WorkspaceGitInfo> = {}): WorkspaceGitInfo {
+  return {
+    directory: '/repo',
+    is_repo: true,
+    upstream: 'origin/main',
+    ...overrides,
+  } as WorkspaceGitInfo;
 }
 
 describe('git-changes（git 状态卡的纯函数层）', () => {
@@ -258,6 +271,68 @@ describe('git-changes（git 状态卡的纯函数层）', () => {
         time: '1 小时前',
       });
       expect(extrasLabel(info(), NOW)).toEqual({ stash: 0, time: null });
+    });
+  });
+
+  /**
+   * `ahead` / `behind` 的**基准**（2026-11 用户报障后补）。
+   *
+   * 现场：`origin` 指向的镜像挂了几天，`origin/main` 停在旧提交，卡片一直显示
+   * ↑5，而远端其实早就收到了。原因是那两个数字算的是 `HEAD` 与**本地记录的
+   * 远端**之差，而那条记录只有 `git fetch` 才更新——卡片当时对"基准有多旧"
+   * 一个字都没说。
+   */
+  describe('ahead/behind 的基准', () => {
+    // 这一节自己钉住 NOW：上一节的 `NOW` 是那个 describe 的局部常量，
+    // 复用要把它提到模块作用域——不如各自持有，测试之间不互相牵连。
+    const NOW = Date.parse('2026-10-19T12:00:00Z');
+    const fetchedAt = (secondsAgo: number) => Math.floor((NOW - secondsAgo * 1000) / 1000);
+
+    it('fetchedAgo：秒 → 相对说法；缺值 / 非法 → null', () => {
+      expect(fetchedAgo(fetchedAt(30), NOW)).toBe('刚刚');
+      expect(fetchedAgo(fetchedAt(90), NOW)).toBe('1 分钟前');
+      expect(fetchedAgo(fetchedAt(3600), NOW)).toBe('1 小时前');
+      expect(fetchedAgo(fetchedAt(3 * 86400), NOW)).toBe('3 天前');
+      expect(fetchedAgo(null, NOW)).toBeNull();
+      expect(fetchedAgo(0, NOW)).toBeNull();
+      expect(fetchedAgo(-5, NOW)).toBeNull();
+      // 时钟偏差：远端时间在"未来"时不说负数
+      expect(fetchedAgo(fetchedAt(-60), NOW)).toBe('刚刚');
+    });
+
+    it('syncTip：没有上游 → null（箭头根本不显示）', () => {
+      // 没有上游时 ahead/behind 恒为 0，画出来会让人以为"和远端同步了"。
+      expect(syncTip(info({ ahead: 5 }), NOW)).toBeNull();
+    });
+
+    it('没有领先/落后 → null（0/0 不需要提示）', () => {
+      expect(syncTip(syncInfo({ ahead: 0, behind: 0 }), NOW)).toBeNull();
+    });
+
+    it('有领先/落后时把**基准时刻**写进提示（这是解释数字可信度的唯一线索）', () => {
+      const tip = syncTip(syncInfo({ ahead: 5, fetched_at: fetchedAt(90) }), NOW);
+      expect(tip).toContain('领先 5 个提交');
+      expect(tip).toContain('1 分钟前');
+      expect(tip).toContain('获取远端');
+    });
+
+    it('从未 fetch 过（fetched_at 缺省）时明说时间未知，而不是省略', () => {
+      const tip = syncTip(syncInfo({ ahead: 2 }), NOW);
+      expect(tip).toContain('时间未知');
+    });
+
+    it('落后与领先可以同时出现（分叉）', () => {
+      const tip = syncTip(syncInfo({ ahead: 1, behind: 2, fetched_at: fetchedAt(10) }), NOW);
+      expect(tip).toContain('领先 1 个提交');
+      expect(tip).toContain('落后 2 个提交');
+    });
+
+    it('syncStale：一小时以内不算旧，超过算旧，从未 fetch 算旧', () => {
+      expect(syncStale(syncInfo({ ahead: 1, fetched_at: fetchedAt(600) }), NOW)).toBe(false);
+      expect(syncStale(syncInfo({ ahead: 1, fetched_at: fetchedAt(2 * 3600) }), NOW)).toBe(true);
+      expect(syncStale(syncInfo({ ahead: 1 }), NOW)).toBe(true);
+      // 没有上游时这个提醒没有意义（箭头都不显示）
+      expect(syncStale(info({ ahead: 3 }), NOW)).toBe(false);
     });
   });
 });

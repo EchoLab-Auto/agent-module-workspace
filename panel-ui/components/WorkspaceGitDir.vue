@@ -27,8 +27,11 @@ import {
   matchesQuery,
   namePart,
   nodeOf,
+  fetchedAgo,
   parentOf,
   relativeTime,
+  syncStale,
+  syncTip,
   summary,
   tailDir,
   visibleGroups,
@@ -48,12 +51,15 @@ const props = defineProps<{
   groupOpen: (kind: ChangeKind) => boolean;
   /** 只刷新本目录时的忙碌态（父组件持有请求与计时器）。 */
   refreshing?: boolean;
+  /** 正在对本目录执行 `git fetch`（与「刷新」是两件事，各有自己的转圈）。 */
+  fetching?: boolean;
 }>();
 
 const emit = defineEmits<{
   (event: 'toggle-row'): void;
   (event: 'toggle-group', kind: ChangeKind): void;
   (event: 'refresh-dir'): void;
+  (event: 'fetch-dir'): void;
 }>();
 
 /** 明细过滤词（本组件私有：收起再展开就该清空——见下面的 `watch`）。 */
@@ -90,14 +96,34 @@ const openRows = computed(() =>
     })),
 );
 
+/** `↑`/`↓` 的悬停说明：没有上游时为 null（不显示箭头，见 `syncTip`）。 */
+const syncTitle = computed(() => syncTip(props.dir));
+
+/** 基准过旧（或有上游但从未 fetch）：需要用户点一下「获取远端」。 */
+const stale = computed(() => syncStale(props.dir));
+
+/** 上游基准的简短说法（展开块里显示，`null` = 不显示）。 */
+const fetchedAgoLabel = computed(() => fetchedAgo(props.dir.fetched_at));
+
+/**
+ * 是跨机目录（`node://`）——那种目录的 fetch 要在对端跑，面板这一版不支持。
+ * 用它决定「获取远端」按钮是否出现：给出一个点了没用的按钮是更差的体验。
+ */
+const isRemote = computed(() => Boolean(nodeOf(props.dir.directory)));
+
 /** 行悬停提示：全路径 + 分支 / 同步 / 计数 / stash / 提交 / 时间（收起态也读得到）。 */
 const rowTip = computed(() => {
   const dir = props.dir;
   const head = `${dir.directory}${node.value ? `（节点 ${node.value}）` : ''}`;
   if (!dir.is_repo) return `${head}\n${dir.error || '不是 git 仓库'}`;
   const bits = [`⑂ ${dir.branch || '（未知分支）'}`];
-  if (dir.ahead) bits.push(`领先 ${dir.ahead}`);
-  if (dir.behind) bits.push(`落后 ${dir.behind}`);
+  if (dir.ahead) bits.push(`领先上游 ${dir.ahead}`);
+  if (dir.behind) bits.push(`落后上游 ${dir.behind}`);
+  // 紧跟在数字后面给基准，不留到末尾：两者是一句话，分开读会误读。
+  const basis = fetchedAgo(dir.fetched_at);
+  if ((dir.ahead || dir.behind) && dir.upstream) {
+    bits.push(basis ? `基准：${basis}的远端` : '基准：从未获取过远端');
+  }
   bits.push(summary(dir));
   // 老 Core / 跨机老对端不发明细：此时"没报冲突"不等于"没有冲突"，说清楚。
   if (conflictUnknown(dir)) bits.push('（未回传变更明细，冲突状态未知）');
@@ -136,6 +162,11 @@ function onRefreshKey(event: KeyboardEvent): void {
   if (props.refreshing) return;
   activate(event, () => emit('refresh-dir'));
 }
+
+function onFetchKey(event: KeyboardEvent): void {
+  if (props.fetching) return;
+  activate(event, () => emit('fetch-dir'));
+}
 </script>
 
 <template>
@@ -155,8 +186,20 @@ function onRefreshKey(event: KeyboardEvent): void {
       {{ hint }}
     </span>
     <span v-if="dir.is_repo" class="wgc-row__branch">⑂ {{ dir.branch || '？' }}</span>
-    <span v-if="dir.ahead" class="wgc-sync" title="领先上游的提交数">↑{{ dir.ahead }}</span>
-    <span v-if="dir.behind" class="wgc-sync" title="落后上游的提交数">↓{{ dir.behind }}</span>
+    <!-- 没有上游时不显示箭头：那时 ahead/behind 恒为 0，画出来只会让人以为
+         "和远端同步了"（`syncTitle` 为 null 正是这个判据）。 -->
+    <span
+      v-if="dir.upstream && dir.ahead"
+      class="wgc-sync"
+      :class="{ 'wgc-sync--stale': stale }"
+      :title="syncTitle ?? undefined"
+    >↑{{ dir.ahead }}</span>
+    <span
+      v-if="dir.upstream && dir.behind"
+      class="wgc-sync"
+      :class="{ 'wgc-sync--stale': stale }"
+      :title="syncTitle ?? undefined"
+    >↓{{ dir.behind }}</span>
     <span v-if="node" class="wgc-node" :title="`跨机节点 ${node}`">
       {{ federatedPeerLabel(node) }}
     </span>
@@ -241,18 +284,46 @@ function onRefreshKey(event: KeyboardEvent): void {
         ⚑{{ dir.stash }}
       </span>
       <span v-if="commitAgo" class="wgc-meta__time" :title="commitAt">{{ commitAgo }}</span>
+      <!-- 上游基准：只在"有上游但基准过旧"时显示。常态下它是噪声，
+           而一旦真的旧了，它就是解释那个 ↑/↓ 为什么不可信的唯一线索。 -->
       <span
-        class="wgc-refresh"
-        :class="{ 'wgc-refresh--busy': refreshing }"
-        role="button"
-        tabindex="0"
-        :aria-disabled="refreshing ? 'true' : undefined"
-        :aria-label="refreshing ? '正在读取该目录的 git 状态' : '只刷新这个目录的 git 状态'"
-        :title="refreshing ? '正在读取该目录…' : '只重新读取这个目录的 git 状态（不重采其他仓库）'"
-        @click.stop="!refreshing && emit('refresh-dir')"
-        @keydown.stop="onRefreshKey"
-      >
-        <PanelIcon name="refresh" size="xs" :class="{ 'wgc-refresh__spin': refreshing }" />
+        v-if="stale && dir.upstream"
+        class="wgc-meta__basis"
+        :title="`ahead/behind 是 HEAD 与本地记录的远端（${dir.upstream}）之差；那个记录只有 git fetch 才更新`"
+      >基准{{ fetchedAgoLabel ? ` ${fetchedAgoLabel}` : '未知' }}</span>
+      <!-- 动作区右对齐：包一层而不是给每个按钮加 `margin-left:auto`——两个
+           auto 边距会让空白摊在它们中间，看起来像两个无关的控件。 -->
+      <span class="wgc-meta__actions">
+        <!-- 获取远端：连远端、更新 ahead/behind 的基准。与右边那个刷新是**两件事**
+             （那个只重读本地 git），所以两个按钮都在、图标也不同。跨机目录不给：
+             它得在对端跑，这一版不支持。 -->
+        <span
+          v-if="!isRemote"
+          class="wgc-fetch"
+          :class="{ 'wgc-fetch--busy': fetching }"
+          role="button"
+          tabindex="0"
+          :aria-disabled="fetching ? 'true' : undefined"
+          :aria-label="fetching ? '正在获取远端' : '获取远端（git fetch）'"
+          :title="fetching ? '正在连远端…' : `git fetch ${dir.upstream ?? '（默认远端）'} —— 更新 ahead/behind 的基准`"
+          @click.stop="!fetching && emit('fetch-dir')"
+          @keydown.stop="onFetchKey"
+        >
+          <PanelIcon name="download" size="xs" :class="{ 'wgc-fetch__spin': fetching }" />
+        </span>
+        <span
+          class="wgc-refresh"
+          :class="{ 'wgc-refresh--busy': refreshing }"
+          role="button"
+          tabindex="0"
+          :aria-disabled="refreshing ? 'true' : undefined"
+          :aria-label="refreshing ? '正在读取该目录的 git 状态' : '只刷新这个目录的 git 状态'"
+          :title="refreshing ? '正在读取该目录…' : '只重新读取这个目录的 git 状态（不重采其他仓库）'"
+          @click.stop="!refreshing && emit('refresh-dir')"
+          @keydown.stop="onRefreshKey"
+        >
+          <PanelIcon name="refresh" size="xs" :class="{ 'wgc-refresh__spin': refreshing }" />
+        </span>
       </span>
     </div>
 
@@ -461,9 +532,15 @@ function onRefreshKey(event: KeyboardEvent): void {
 /* 只刷新本目录：窄卡里用最小的可点元素，悬停才显形（不抢正文注意力）。
    文字换成图标后靠 `display:flex` 定住图标盒：`line-height` 对 svg 不起作用，
    不显式撑开的话可点区域会塌成图标本身那一小块。 */
-.wgc-refresh {
+.wgc-meta__actions {
   flex: 0 0 auto;
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.wgc-refresh {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -489,8 +566,54 @@ function onRefreshKey(event: KeyboardEvent): void {
   opacity: 0.55;
 }
 /* 忙碌态：图标自转（与整卡按钮里 ui-frame 的内建 spinner 同语义） */
-.wgc-refresh__spin {
+.wgc-refresh__spin,
+.wgc-fetch__spin {
   animation: wgc-refresh-spin 1s linear infinite;
+}
+
+/* 获取远端：与刷新同一副外观（同一个 meta 行里的两个对等动作），
+   只是悬停色换成 accent——它是会连网络的那个，值得多一点视觉重量。 */
+.wgc-fetch {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 14px;
+  border-radius: 5px;
+  background: var(--panel-hover);
+  color: var(--nm-text-secondary);
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.75;
+}
+.wgc-fetch:hover {
+  background: var(--panel-accent-soft);
+  color: var(--panel-accent);
+  opacity: 1;
+}
+.wgc-fetch:focus-visible {
+  outline: 1px solid var(--panel-accent);
+}
+.wgc-fetch--busy {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* 上游基准过旧：箭头退成描边灰，提示"这个数字不是当前的"。
+   不隐藏——隐藏会让人以为没有未推送，而那正是要避免的误读。 */
+.wgc-sync--stale {
+  opacity: 0.6;
+  text-decoration: underline dotted;
+}
+
+/* 基准时刻标签（只在过旧时出现） */
+.wgc-meta__basis {
+  font-size: 10px;
+  color: var(--nm-text-secondary);
+  opacity: 0.8;
+  border-bottom: 1px dotted currentColor;
+  cursor: help;
 }
 @keyframes wgc-refresh-spin {
   to {

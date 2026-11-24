@@ -119,6 +119,26 @@ pub struct WorkspaceGitInfo {
     pub is_repo: bool,
     #[serde(default)]
     pub branch: Option<String>,
+    /// 上游引用（`origin/main` 这类全名）；`None` = 没配上游。
+    ///
+    /// 面板据此区分两种「0/0」：**没有上游**（永远 0，箭头不该出现）与
+    /// **与上游同步**（真的是 0）。只靠 `ahead`/`behind` 两个数字看不出来。
+    #[serde(default)]
+    pub upstream: Option<String>,
+    /// `ahead` / `behind` 的**基准时刻**（unix 秒，= `.git/FETCH_HEAD` 的
+    /// 修改时间；取不到为 `None`）。
+    ///
+    /// ## 为什么必须回传它
+    ///
+    /// 这两个数字算的是 `HEAD` 与**本地记录的远端**之差，而那条记录只有
+    /// `git fetch` 才更新。不标明基准时间，一个陈旧的记录会长期伪装成
+    /// 「5 个提交没推上去」——2026-11 现场：`origin` 指向的镜像挂了几天，
+    /// `origin/main` 停在旧提交，卡片一直显示 ↑5，而远端其实早就收到了。
+    ///
+    /// 面板据此在悬停提示里写「相对于 X 分钟前的远端」，并在超过阈值时提示
+    /// 点一下 fetch。
+    #[serde(default)]
+    pub fetched_at: Option<i64>,
     #[serde(default)]
     pub ahead: u32,
     #[serde(default)]
