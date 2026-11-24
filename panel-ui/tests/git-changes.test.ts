@@ -153,23 +153,28 @@ describe('git-changes（git 状态卡的纯函数层）', () => {
     });
 
     it('summary 把冲突放在最前；干净仓库是一句「工作区干净」', () => {
+      // 明细是 `UU`（冲突）与 ` M`（已修改）两条：冲突条目**只**归 conflicted
+      // 类，不该在「已暂存 / 已修改」里再各算一次（2026-11 口径统一：summary
+      // 与展开后的 chip 走同一个 `countOf`，不再直接用 Core 的分列计数）。
       const dir = info({
         staged: 1,
         modified: 2,
         changed_entries: [entry('c.ts', 'U', 'U'), entry('a.ts', ' ', 'M')],
       });
-      expect(summary(dir)).toBe('冲突 1 · 已暂存 1 · 已修改 2');
+      expect(summary(dir)).toBe('冲突 1 · 已修改 1');
       expect(summary(info())).toBe('工作区干净');
     });
 
     it('repoSummary 只统计真实仓库', () => {
+      // `changes` 按文件去重：一个 `A ` 暂存 + 一个 `UU` 冲突 = 2 个文件
+      // （旧口径把冲突算进 staged 与 modified 两列，得 4）。
       expect(
         repoSummary([
           info({ staged: 1, changed_entries: [entry('a.ts', 'A', ' ')] }),
           info({ directory: '/srv/x', is_repo: false, error: '目录不存在' }),
           info({ directory: '/srv/b', modified: 3, changed_entries: [entry('u.ts', 'U', 'U')] }),
         ]),
-      ).toEqual({ repos: 2, changes: 4, conflicts: 1 });
+      ).toEqual({ repos: 2, changes: 2, conflicts: 1 });
     });
 
     it('自动铺开阈值是小型改动（≤ 6 个文件）', () => {

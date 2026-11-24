@@ -89,6 +89,26 @@ function entriesOf(dir: WorkspaceGitInfo, kind: ChangeKind): WorkspaceChangedEnt
   return (dir.changed_entries ?? []).filter((entry) => kindsOf(entry).includes(kind));
 }
 
+/**
+ * Core 的"某类计数"是否已到采集上限（明细因此可能不全）。
+ *
+ * 判据取 Core 的**分列计数**而不是"本类明细条数"：Core 的配额是按 porcelain
+ * 的两列分别计数的（`git.rs`：`staged` 列 / `modified` 列 / untracked 各自
+ * `CHANGED_FILES_CAP`），而展示侧的 `conflicted` 类把冲突条目从这两列里**排除**
+ * 了。用明细条数判会漏：30 个 `UU` 冲突占满 staged 列之后，staged 类自己的
+ * 明细数是 0（全被排除），于是被当成"没截断"而报 0——真存的 5 个暂存改动连同
+ * 整个「已暂存」chip 一起消失。
+ */
+function columnCapped(dir: WorkspaceGitInfo, kind: Exclude<ChangeKind, 'conflicted'>): boolean {
+  const reported = kind === 'staged' ? dir.staged : kind === 'modified' ? dir.modified : dir.untracked;
+  return (reported ?? 0) >= ENTRY_CAP;
+}
+
+/** 快照里是否有任何一类可能被截断（此时无法用明细去重算真数）。 */
+function anyCapped(dir: WorkspaceGitInfo): boolean {
+  return columnCapped(dir, 'staged') || columnCapped(dir, 'modified') || columnCapped(dir, 'untracked');
+}
+
 /** 该类在快照里的总条数。 */
 export function countOf(dir: WorkspaceGitInfo, kind: ChangeKind): number {
   const entries = dir.changed_entries ?? [];
@@ -101,13 +121,29 @@ export function countOf(dir: WorkspaceGitInfo, kind: ChangeKind): number {
   const reported = kind === 'staged' ? dir.staged : kind === 'modified' ? dir.modified : dir.untracked;
   // 老 Core / 跨机老对端：没有明细可数，只有计数。
   if (!entries.length) return reported ?? 0;
-  // 明细被截断（满额）：只有 Core 知道真数。
-  return listed >= ENTRY_CAP ? (reported ?? 0) : listed;
+  // Core 的分列计数到上限：明细可能被截断，只有 Core 知道真数（会含冲突条目，
+  // 这是无法在展示侧去掉的已知偏差——但比"整类消失"接近事实）。
+  return columnCapped(dir, kind) ? (reported ?? 0) : listed;
 }
 
-/** 变更文件总数（行右侧的数字 / 干净判定；口径与边栏徽标一致）。 */
+/**
+ * 变更文件总数（行右侧的数字 / 干净判定 / 边栏徽标 / 自动铺开阈值）。
+ *
+ * **按文件去重**，不是把三类计数相加：
+ * - `MM`（暂存后又改）是**一个**文件，加两类会算成 2；
+ * - 冲突（`UU` 等）也是一个文件，而 Core 把它同时计入 staged 与 modified 两列
+ *   ——此前 `staged + modified + untracked` 会把它算成 2，行上出现「2」而旁边
+ *   的冲突角标写着「!1」，两个数字自相矛盾。
+ *
+ * 有完整明细时直接数明细条数（每条形如一条 porcelain 记录 = 一个文件）。明细
+ * 被截断（[`anyCapped`]）或根本不存在（老 Core）时无法去重，退回 Core 的三列
+ * 计数之和——这是已知偏差，见 [`countOf`]。
+ */
 export function changedCount(dir: WorkspaceGitInfo): number {
-  return (dir.staged ?? 0) + (dir.modified ?? 0) + (dir.untracked ?? 0);
+  const entries = dir.changed_entries ?? [];
+  const reported = (dir.staged ?? 0) + (dir.modified ?? 0) + (dir.untracked ?? 0);
+  if (!entries.length || anyCapped(dir)) return reported;
+  return entries.length;
 }
 
 /** 冲突条数（只在有明细时可知）。 */
@@ -155,14 +191,22 @@ export function visibleGroups(dir: WorkspaceGitInfo): GroupRow[] {
   return groupRows(dir).filter((group) => group.count > 0 || group.entries.length > 0);
 }
 
-/** 一行文字：「冲突 1 · 已暂存 3 · 已修改 5」；全零时是「工作区干净」。 */
+/**
+ * 一行文字：「冲突 1 · 已暂存 3 · 已修改 5」；全零时是「工作区干净」。
+ *
+ * 三类数字全部走 [`countOf`]（与展开后的 chip 同一口径）：此前这里直接用
+ * `dir.staged` / `dir.modified`，而 chip 用 `countOf`——同一条目在悬停提示与
+ * 展开明细里显示成两个不同的数字（冲突条目被 chip 排除、被 summary 计入）。
+ */
 export function summary(dir: WorkspaceGitInfo): string {
   const parts: string[] = [];
   const conflicts = conflictCount(dir);
   if (conflicts) parts.push(`冲突 ${conflicts}`);
-  if (dir.staged) parts.push(`已暂存 ${dir.staged}`);
-  if (dir.modified) parts.push(`已修改 ${dir.modified}`);
-  if (dir.untracked) parts.push(`未跟踪 ${dir.untracked}`);
+  for (const { kind, label } of CHANGE_KINDS) {
+    if (kind === 'conflicted') continue;
+    const count = countOf(dir, kind);
+    if (count) parts.push(`${label} ${count}`);
+  }
   return parts.length ? parts.join(' · ') : '工作区干净';
 }
 

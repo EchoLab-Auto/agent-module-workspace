@@ -14,7 +14,7 @@
 //! - 明细超过 [`SEARCH_THRESHOLD`] 条才出现过滤框（少的时候它只是多一个输入框）；
 //! - 「刷新」只重读**这一个目录**（父组件把 `directories: [本目录]` 发出去），
 //!   工作区里其他仓库的 git 子进程一个都不跑。
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { federatedPeerLabel } from '@echo-agent/panel';
 import PanelIcon from '@echo-agent/panel/components/PanelIcon';
 import type { WorkspaceGitInfo } from '@echo-agent/panel';
@@ -56,8 +56,18 @@ const emit = defineEmits<{
   (event: 'refresh-dir'): void;
 }>();
 
-/** 明细过滤词（本组件私有：收起再展开就该清空）。 */
+/** 明细过滤词（本组件私有：收起再展开就该清空——见下面的 `watch`）。 */
 const query = ref('');
+
+// 收起时清空过滤词。此前注释这么写但没有任何复位代码：`v-if` 只隐藏 DOM，
+// 组件实例还在，于是重新展开后输入框仍是上一次的词、列表空着并提示
+// 「…没有匹配「fxx」的文件」——看起来像文件全没了。
+watch(
+  () => props.open,
+  (open) => {
+    if (!open) query.value = '';
+  },
+);
 
 const node = computed(() => nodeOf(props.dir.directory));
 const hasEntries = computed(() => (props.dir.changed_entries ?? []).length > 0);

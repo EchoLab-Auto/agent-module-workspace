@@ -7,7 +7,6 @@ import {
   definePanelExtension,
   registerPanelExtension,
   sendCommand,
-  sessionKey,
   state,
   teamModuleEnabled,
   teamToolAvailable,
@@ -29,7 +28,7 @@ import {
   takeLocalActivateIntent,
   workspacePickIntent,
 } from './workspace';
-import { consumeEvent, resetCaches, workspace, workspaceRevision } from './workspace-store';
+import { consumeEvent, gitSessionKey, resetCaches, workspace, workspaceRevision } from './workspace-store';
 import {
   consumeConversationDeleteResult,
   resetConversationDeletes,
@@ -195,10 +194,16 @@ registerPanelExtension(definePanelExtension({
     void workspaceRevision.value;
     const session = workspaceCard(teamId);
     if (!session) return [];
-    const scoped = sessionKey(state.activeRegion, session.id);
-    const dirs = workspace.gitBySession[scoped] ?? [];
-    // 徽标口径与卡内一致（`git-changes.ts`：已暂存 + 已修改 + 未跟踪）；冲突
-    // 另算一句提示——它是要最早看到的那条信息，但不该把徽标数字再放大一份。
+    const scope = teamId ?? state.teams[0]?.id ?? null;
+    // 键与卡片同源（`gitSessionKey` 含人格 + core）：写在这里的第二套拼法迟早
+    // 与卡片不一致，表现为徽标有数字、点开却是一张空卡。
+    const dirs =
+      workspace.gitBySession[gitSessionKey(state.activeRegion, scope, session.id)] ??
+      workspace.gitBySession[gitSessionKey(state.activeRegion, null, session.id)] ??
+      [];
+    // 徽标口径与卡内一致（`git-changes.ts::changedCount`：按文件去重，冲突只算
+    // 一次）；冲突另算一句提示——它是要最早看到的那条信息，但不该把徽标数字再
+    // 放大一份。
     const changed = dirs.reduce((sum, dir) => sum + changedCount(dir), 0);
     const conflicts = dirs.reduce((sum, dir) => sum + conflictCount(dir), 0);
     const countTitle = conflicts
@@ -211,7 +216,7 @@ registerPanelExtension(definePanelExtension({
         id: 'files',
         title: `文件浏览器 · ${session.name}`,
         component: WorkspaceFilesRail,
-        componentProps: { session, teamId: teamId ?? state.teams[0]?.id ?? null },
+        componentProps: { session, teamId: scope },
       },
       {
         id: 'git',
@@ -219,7 +224,7 @@ registerPanelExtension(definePanelExtension({
         count: changed,
         countTitle,
         component: WorkspaceGitCard,
-        componentProps: { session, teamId: teamId ?? state.teams[0]?.id ?? null },
+        componentProps: { session, teamId: scope },
       },
     ];
   },

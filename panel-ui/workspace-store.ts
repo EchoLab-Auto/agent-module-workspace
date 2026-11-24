@@ -24,7 +24,7 @@
 //! 校正后 App 会按新 agent 重拉）。
 
 import { ref } from 'vue';
-import { scopedKey, sessionKey, state, type WorkspaceFileEntry, type WorkspaceGitInfo, type WorkspaceSessionInfo } from '@echo-agent/panel';
+import { scopedKey, state, type WorkspaceFileEntry, type WorkspaceGitInfo, type WorkspaceSessionInfo } from '@echo-agent/panel';
 
 /** 工作区模块 id（人格门控 / 挂载判据都用它）。 */
 export const MODULE_ID = 'echo-agent.workspace';
@@ -58,8 +58,10 @@ export const workspace = {
   activeConversation: null as string | null,
   /** 列表请求代数：拒绝切换 team/core 后到达的旧快照。 */
   generation: 0,
-  /** 各会话目录 git 状态的缓存（`(core, session)` → 目录结果）。 */
+  /** 各会话目录 git 状态的缓存（`sessionScopedKey(core, team, session)` → 目录结果）。 */
   gitBySession: {} as Record<string, WorkspaceGitInfo[]>,
+  /** 每个目录最后一次被回包更新的序号（`会话键\0目录` → 递增），用于精确收掉忙碌态。 */
+  gitRevByDir: {} as Record<string, number>,
   /** 文件浏览器缓存（`(core, path)` → 条目 / 错误）。 */
   files: {} as Record<string, { entries: WorkspaceFileEntry[]; error: string | null }>,
 };
@@ -93,13 +95,76 @@ export function applySessions(payload: WorkspaceSessionsPayload, core: string | 
   bump();
   return true;
 }
+/**
+ * git 快照的会话键：`(core, team, 工作区 id)`。
+ *
+ * 为什么把人格也编进去：`WorkspaceGitStatus` 带 `team_id`，而同一个 core 下
+ * 两个人格各有一个同 id 的工作区是常态。只按 `(core, session)` 存会让后到者
+ * 覆盖前者——A 人格的卡片显示 B 人格的分支与计数（2026-11 缺陷）。
+ *
+ * 用两级 [`scopedKey`] 而不是壳的 `sessionScopedKey`：后者尚未从扩展 API 导出，
+ * 而 `scopedKey` 是公开的、语义就是"复合键"；两者结构一致（`core\0team\0id`）。
+ */
+export function gitSessionKey(
+  core: string | null,
+  teamId: string | null | undefined,
+  workspaceId: string,
+): string {
+  return scopedKey(core, teamId ? `${teamId}\u0000${workspaceId}` : workspaceId);
+}
 
-/** `WorkspaceGitStatus` 归约。 */
+/** 目录更新时间戳的键（`会话键\0目录`）。 */
+function gitDirRevKey(sessionKeyValue: string, directory: string): string {
+  return `${sessionKeyValue}\u0000${directory.replace(/\/+$/, '')}`;
+}
+
+/**
+ * 某目录最后一次被回包更新的序号（0 = 从未更新过）。
+ *
+ * 键做两级回退（带人格 → 不带人格），与 `dirs` 的读法一致：旧 Core 的回包
+ * 可能没有 `team_id`（于是写入的是裸键），只认带人格的键会让忙碌态永远收不掉。
+ */
+export function gitDirRevision(
+  core: string | null,
+  teamId: string | null | undefined,
+  workspaceId: string,
+  directory: string,
+): number {
+  const scoped = workspace.gitRevByDir[gitDirRevKey(gitSessionKey(core, teamId, workspaceId), directory)];
+  if (scoped !== undefined) return scoped;
+  return workspace.gitRevByDir[gitDirRevKey(gitSessionKey(core, null, workspaceId), directory)] ?? 0;
+}
+
+/**
+ * `WorkspaceGitStatus` 归约：**按目录合并**，不整份替换。
+ *
+ * 为什么必须合并（2026-11 缺陷）：面板的「只刷新这个目录」会把 `directories`
+ * 一起发下去（一个工作区常有 5 个仓库，改完一个不该让其余四个也各跑一遍 git
+ * 子进程），Core 就只回这几个目录。此前这里是 `= payload.directories`——单目录
+ * 刷新的回包一到，卡片上其余仓库的行全部消失，直到下一次整卡刷新才回来。
+ *
+ * 键含人格（[`gitSessionKey`]）：`WorkspaceGitStatus` 带 `team_id`，两个人格各
+ * 有一个同 id 的工作区是常态，只按 `(core, session)` 存会让后到者覆盖前者——
+ * A 人格的卡显示 B 人格的分支与计数。
+ *
+ * 各目录的更新序号（[`gitDirRevision`]）在合并时一起推进：调用方据此判断
+ * "我等的那个目录回来了"，而不是"任意一个目录回来了"。
+ */
 export function applyGit(payload: {
   session_id: string;
+  team_id?: string | null;
   directories: WorkspaceGitInfo[];
 }, core: string | null): void {
-  workspace.gitBySession[sessionKey(core, payload.session_id)] = payload.directories ?? [];
+  const key = gitSessionKey(core, payload.team_id, payload.session_id);
+  // Map 保留插入顺序：已在快照里的目录保持原位（`set` 覆盖值不改位置），
+  // 新目录追加——一次整卡刷新（快照为空）时顺序就等于 Core 的回传顺序。
+  const merged = new Map((workspace.gitBySession[key] ?? []).map((dir) => [dir.directory, dir]));
+  for (const dir of payload.directories ?? []) {
+    merged.set(dir.directory, dir);
+    const revKey = gitDirRevKey(key, dir.directory);
+    workspace.gitRevByDir[revKey] = (workspace.gitRevByDir[revKey] ?? 0) + 1;
+  }
+  workspace.gitBySession[key] = [...merged.values()];
   bump();
 }
 
@@ -130,6 +195,7 @@ export function notifyChanged(): void {
 /** 重连 / 切区域后清掉按路径与按会话的缓存（列表由下一次请求重建）。 */
 export function resetCaches(): void {
   workspace.gitBySession = {};
+  workspace.gitRevByDir = {};
   workspace.files = {};
   bump();
 }
@@ -151,7 +217,7 @@ export function consumeEvent(event: unknown): boolean {
     return true;
   }
   const git = frame.WorkspaceGitStatus as
-    | { session_id: string; directories: WorkspaceGitInfo[] }
+    | { session_id: string; team_id?: string | null; directories: WorkspaceGitInfo[] }
     | undefined;
   if (git) {
     applyGit(git, coreOf(git));
