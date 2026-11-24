@@ -1,1 +1,6 @@
 /target
+
+# 模块 UI 的构建产物与依赖：产物由部署脚本复制到 Panel 静态目录，
+# 依赖是每次构建现装的（不在仓里放 node_modules）。
+panel-ui/node_modules/
+panel-ui/dist/

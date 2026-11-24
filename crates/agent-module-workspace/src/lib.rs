@@ -402,6 +402,51 @@ impl ModuleState {
     }
 }
 
+/// 本模块的面板 UI 贡献（bundle 的站点相对路径）。
+///
+/// 约定：`panel-extensions/<模块 id>/index.js`。固定路径而不是带 hash——面板
+/// 靠它 import，名字一变所有已构建的扩展立刻失联（面板宁可每次重建都覆盖
+/// 同一个文件名）。
+pub const PANEL_UI_BUNDLE: &str = "panel-extensions/echo-agent.workspace/index.js";
+
+/// 面板 UI SDK 契约版本（与 Panel 仓 `panel-shared.entries.json` 的
+/// `sdkVersion` 一致）。
+///
+/// 面板加载前逐字比对，不符即拒绝——UI 扩展在运行期加载，API 用错不会在
+/// 构建期报错，只会在用户浏览器里崩，版本握手是唯一拦截点。
+pub const PANEL_UI_SDK_VERSION: &str = "1";
+
+/// 向 Core 登记本模块的面板 UI 贡献。
+///
+/// 返回 `Ok(None)` = 宿主没装注册表（嵌入式部署 / 老 Core），不算错误：
+/// 那种部署本来就没有面板。
+///
+/// ## 为什么 bundle 路径是编译期常量
+///
+/// 运行期读配置会让"同一个二进制在不同机器上加载不同 UI"——而 UI 产物是随
+/// 模块一起发布的，路径本来就固定。想换路径的场景（灰度/多版本）不值得用
+/// 一个可配项换掉这个确定性。
+fn panel_ui_contribution(
+    mctx: &echo_module::MountContext,
+) -> Result<Option<echo_defs::Disposer>, String> {
+    use echo_defs::panel_ui::{PanelUiContribution, PANEL_UI_REGISTRAR};
+
+    let Some(registrar) = mctx.service(&PANEL_UI_REGISTRAR) else {
+        tracing::debug!(
+            module = MODULE_ID,
+            "宿主未提供面板 UI 注册表；本模块的界面入口不可用（嵌入式部署常见）"
+        );
+        return Ok(None);
+    };
+    let contribution = PanelUiContribution {
+        id: MODULE_ID.to_string(),
+        name: "工作区会话".to_string(),
+        bundle: PANEL_UI_BUNDLE.to_string(),
+        sdk_version: PANEL_UI_SDK_VERSION.to_string(),
+    };
+    registrar.register(contribution).map(Some)
+}
+
 /// 模块声明文件——身份写在 TOML 里（单一真值）。
 ///
 /// `include_str!` 而不是运行期读盘：清单是编译期常量，散在部署目录里会让
@@ -473,7 +518,26 @@ pub fn module_with_state(version: &str) -> (Arc<dyn Module>, Arc<ModuleState>) {
                 );
             }
             mount_state.set_remote_query(remote_query);
-            Ok(Vec::new())
+            // 面板 UI 贡献（2026-11）：把本模块的**前端 bundle** 登记给 Core，
+            // 面板启动时经 `echo-agent.panel-ui.list` 拿到清单再 `import()`。
+            //
+            // 在此之前 UI 只能靠 `PANEL_UI_EXTENSIONS` 在面板**构建期**编进
+            // 产物：改一行 UI 要重建整个面板，忘了配环境变量就静默变纯壳
+            // （模块在 Core 里挂着、界面上什么入口都没有）。
+            //
+            // 归属跟着挂载走：返回的 `Disposer` 进模块的 keep 列表，模块被
+            // 禁用/卸载时自动撤销，面板上的入口随之消失。
+            let mut keeps = Vec::new();
+            match crate::panel_ui_contribution(&ctx) {
+                Ok(Some(disposer)) => keeps.push(disposer),
+                Ok(None) => {}
+                Err(error) => {
+                    // 登记失败不该让整个模块挂不上：UI 是附加能力，缺了只是
+                    // 面板上少一块，而 workspace 的会话管理/工具仍然可用。
+                    tracing::warn!(module = MODULE_ID, %error, "面板 UI 贡献登记失败");
+                }
+            }
+            Ok(keeps)
         })
         // 命令域：面板 7 条 + 宿主内部 2 条 + 工具入口 1 条。
         //

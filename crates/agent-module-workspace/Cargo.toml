@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 echo-module.workspace = true
 echo-context.workspace = true
+echo-defs.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true

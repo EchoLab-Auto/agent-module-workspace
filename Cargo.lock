@@ -7,12 +7,30 @@ name = "agent-module-workspace"
 version = "0.1.0"
 dependencies = [
  "echo-context",
+ "echo-defs",
  "echo-module",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "async-trait"
+version = "0.1.92"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bitflags"
@@ -60,6 +78,22 @@ dependencies = [
  "dashmap",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "echo-defs"
+version = "0.3.1"
+source = "git+https://github.com/EchoLab-Auto/EchoAgentCore?rev=c59b4aee819a70768903d4914fe679f9999f0f54#c59b4aee819a70768903d4914fe679f9999f0f54"
+dependencies = [
+ "async-trait",
+ "base64",
+ "echo-context",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

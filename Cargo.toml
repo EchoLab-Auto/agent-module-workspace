@@ -22,3 +22,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 tracing = "0.1"
+# 面板 UI 贡献接缝（`PanelUiRegistrar`）住在 Core 的定义层 `echo-defs`：跨 crate
+# 的服务键要求**同一个 trait 类型**（`Ctx::service` 的 downcast 认 vtable，
+# 不认同名），所以模块必须依赖定义它的那个 crate。`rev` 与 Core 的引用同一个
+# 提交——不同提交意味着两份 `dyn Trait`，注册会静默查不到。
+echo-defs = { git = "https://github.com/EchoLab-Auto/EchoAgentCore", rev = "c59b4aee819a70768903d4914fe679f9999f0f54" }
