@@ -411,6 +411,11 @@ function formatSize(size: number): string {
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+  /* 填满宿主卡体的剩余高度（2026-11，滚动嵌套修复）：此前本组件高度=内容高
+     （头部 34 + 树 48vh），比卡体高时卡体先滚、树再滚——wheel 在两层之间来回
+     接力。改成 flex 撑满后，树拿到的就是卡体的真实剩余空间，卡体不再溢出。 */
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .wfb-head {
@@ -450,11 +455,15 @@ function formatSize(size: number): string {
   pointer-events: none; /* 不抢 hover，避免闪烁 */
 }
 
-/* ── 树 ── */
+/* ── 树（本组件唯一的滚动区）──
+   高度不再按视口比例（原 `max-height: 48vh`）猜测：那与宿主卡体的可用高度
+   脱钩（实测卡体 84px、树却画到 518px），于是卡体滚一层、树再滚一层。
+   现在由 flex 从父级 `.wfb` 取「卡体剩余高度」，超出即在本层滚动。 */
 .wfb-tree {
   display: flex;
   flex-direction: column;
-  max-height: 48vh;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
 }

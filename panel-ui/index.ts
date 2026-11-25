@@ -203,6 +203,14 @@ registerPanelExtension(definePanelExtension({
       {
         id: 'files',
         title: `文件浏览器 · ${session.name}`,
+        // 这份内容自带滚动区（树 `flex: 1` + `overflow-y: auto`），需要卡体
+        // 给它真实高度：默认 80px 的最小高度里，卡头 + 管理入口就吃光，
+        // 树被压到 0 高、只剩一条滚不动的空条（2026-11 实测 clientH=0）。
+        // 200 = 「树可见约 75px ≈ 3 行」的下限，同时保住右侧栏原有分配：
+        // 1920×1080 下 818px 列高减去两张紧凑卡与间距后，剩 397px 由
+        // 本卡 + Git + Shell 三张平分——取 200 后另两张各得 ~88（仍在它们
+        // 的 80px 下限之上，不会把列顶到整列滚动）。
+        minHeight: 200,
         component: WorkspaceFilesRail,
         componentProps: { session, teamId: scope },
       },
