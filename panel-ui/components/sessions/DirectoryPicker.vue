@@ -159,12 +159,12 @@ watch(
         <NeumorphismSelect
           :model-value="location"
           class="dp-location"
-          size="small"
+          :size="36"
           :options="locationOptions"
           @update:model-value="(v) => pickLocation(String(v ?? 'local'))"
         />
         <NeumorphismButton
-          size="small"
+          :size="32"
           variant="glass"
           aria-label="关闭"
           @click="emit('close')"
@@ -184,7 +184,7 @@ watch(
         </template>
         <NeumorphismButton
           v-if="stack.length"
-          size="small"
+          :size="32"
           variant="glass"
           class="dp-up"
           @click="goUp"
@@ -197,7 +197,7 @@ watch(
       <div class="dp-body">
         <div v-if="error" class="dp-error" :title="error">{{ error }}</div>
         <div v-else-if="!listing" class="dp-loading muted">
-          <NeumorphismSpinner size="small" /> 读取中…
+          <NeumorphismSpinner :size="14" /> 读取中…
         </div>
         <template v-else>
           <!-- 根视图：浏览根列表 -->
@@ -244,7 +244,7 @@ watch(
           {{ currentDir ? `当前：${displayPath(currentDir.path)}` : '点击根目录可选择或进入浏览' }}
         </span>
         <NeumorphismButton
-          size="small"
+          :size="32"
           variant="primary"
           :disabled="!currentDir"
           @click="selectCurrent"

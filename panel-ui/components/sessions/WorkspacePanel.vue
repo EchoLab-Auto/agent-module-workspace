@@ -496,10 +496,10 @@ watch(
         <p class="ws-head__sub">多会话 · 多工作区目录 · 每会话多对话（git 状态见侧边栏「Git」卡片）</p>
       </div>
       <div class="ws-head__actions">
-        <NeumorphismButton size="small" variant="glass" :disabled="!state.connected" @click="startCreate">
+        <NeumorphismButton :size="32" variant="glass" :disabled="!state.connected" @click="startCreate">
           新建
         </NeumorphismButton>
-        <NeumorphismButton size="small" variant="glass" :disabled="!state.connected" @click="requestSessions">
+        <NeumorphismButton :size="32" variant="glass" :disabled="!state.connected" @click="requestSessions">
           刷新
         </NeumorphismButton>
       </div>
@@ -531,7 +531,7 @@ watch(
           如 <code>node://gpu-box/srv/repo</code>——需联邦在线且对端
           allow_queries 放行 workspace_files / workspace_git_status /
           browse_directories）
-          <NeumorphismButton size="small" variant="glass" @click="pickerOpen = true">
+          <NeumorphismButton :size="32" variant="glass" @click="pickerOpen = true">
             浏览…
           </NeumorphismButton>
         </span>
@@ -564,10 +564,10 @@ watch(
           placeholder='{&#10;  "name": "示例工作区",&#10;  "directories": ["/srv/repo"],&#10;  "conversations": [{ "id": "main", "name": "主对话", "legacy": true }]&#10;}'
         />
         <div class="ws-json__actions">
-          <NeumorphismButton size="small" variant="glass" :disabled="!formJson.trim()" @click="applyJsonFromButton">
+          <NeumorphismButton :size="32" variant="glass" :disabled="!formJson.trim()" @click="applyJsonFromButton">
             应用 JSON
           </NeumorphismButton>
-          <NeumorphismButton v-if="editing.id" size="small" variant="glass" @click="resetJson">
+          <NeumorphismButton v-if="editing.id" :size="32" variant="glass" @click="resetJson">
             重置
           </NeumorphismButton>
         </div>
@@ -578,14 +578,14 @@ watch(
         <!-- 贴了 JSON 但没点「应用」时表单名称可能还是空的：脏 JSON 也算可保存，
              否则按钮禁用会让人以为「贴进去没生效」。 -->
         <NeumorphismButton
-          size="small"
+          :size="32"
           variant="glass"
           :disabled="(!formName.trim() && !jsonDirty) || !!actionPending"
           @click="save"
         >
           {{ actionPending?.startsWith('save:') ? '保存中…' : '保存' }}
         </NeumorphismButton>
-        <NeumorphismButton size="small" variant="glass" @click="cancelEdit">取消</NeumorphismButton>
+        <NeumorphismButton :size="32" variant="glass" @click="cancelEdit">取消</NeumorphismButton>
       </div>
     </div>
 
@@ -630,7 +630,7 @@ watch(
           <div class="ws-convs__head">
             <span class="ws-convs__title">对话</span>
             <NeumorphismButton
-              size="small"
+              :size="32"
               variant="glass"
               :disabled="!state.connected"
               @click="startConvCreate(session)"
@@ -657,14 +657,14 @@ watch(
               />
               <span class="ws-conv__actions">
                 <NeumorphismButton
-                  size="small"
+                  :size="32"
                   variant="glass"
                   :disabled="!convFormName.trim()"
                   @click="saveConvForm(session)"
                 >
                   保存
                 </NeumorphismButton>
-                <NeumorphismButton size="small" variant="glass" @click="cancelConvForm">
+                <NeumorphismButton :size="32" variant="glass" @click="cancelConvForm">
                   取消
                 </NeumorphismButton>
               </span>
@@ -673,10 +673,10 @@ watch(
               <span class="ws-conv__name">{{ conv.name }}</span>
               <span v-if="isActiveConversation(session, conv)" class="ws-badge">当前</span>
               <span class="ws-conv__actions">
-                <NeumorphismButton size="small" variant="glass" @click.stop="startConvRename(session, conv)">
+                <NeumorphismButton :size="32" variant="glass" @click.stop="startConvRename(session, conv)">
                   改名
                 </NeumorphismButton>
-                <NeumorphismButton size="small" variant="glass" @click.stop="removeConversation(session, conv)">
+                <NeumorphismButton :size="32" variant="glass" @click.stop="removeConversation(session, conv)">
                   删除
                 </NeumorphismButton>
               </span>
@@ -696,25 +696,25 @@ watch(
             />
             <span class="ws-conv__actions">
               <NeumorphismButton
-                size="small"
+                :size="32"
                 variant="glass"
                 :disabled="!convFormName.trim()"
                 @click="saveConvForm(session)"
               >
                 创建
               </NeumorphismButton>
-              <NeumorphismButton size="small" variant="glass" @click="cancelConvForm">
+              <NeumorphismButton :size="32" variant="glass" @click="cancelConvForm">
                 取消
               </NeumorphismButton>
             </span>
           </div>
         </div>
         <div class="ws-card__actions" @click.stop>
-          <NeumorphismButton size="small" variant="glass" @click="toggleActive(session)">
+          <NeumorphismButton :size="32" variant="glass" @click="toggleActive(session)">
             {{ session.id === activeId ? '取消激活' : '激活' }}
           </NeumorphismButton>
-          <NeumorphismButton size="small" variant="glass" @click="startEdit(session)">编辑</NeumorphismButton>
-          <NeumorphismButton size="small" variant="glass" :disabled="!!actionPending" @click="remove(session)">删除</NeumorphismButton>
+          <NeumorphismButton :size="32" variant="glass" @click="startEdit(session)">编辑</NeumorphismButton>
+          <NeumorphismButton :size="32" variant="glass" :disabled="!!actionPending" @click="remove(session)">删除</NeumorphismButton>
         </div>
       </div>
       <div v-if="teamId && !sessions.length && sessionsPhase === 'idle'" class="muted ws-empty">

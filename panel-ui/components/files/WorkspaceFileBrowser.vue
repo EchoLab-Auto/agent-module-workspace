@@ -283,23 +283,38 @@ function formatSize(size: number): string {
     <div class="wfb-head">
       <span class="wfb-title">文件浏览器</span>
       <div class="wfb-actions">
+        <!-- 卡头图标钮（2026-11）：外框 26×26 / 圆角 8px / 14px 图标——与
+             「当前会话」卡的刷新钮（`SessionContextCard` 的 `.session-context__refresh`）
+             逐像素同形，同一右栏里两处刷新不出现两套尺寸。
+             材质用 `raised`（实色凸起）而不是 `glass`：见样式段「高度模型」的说明。
+             文字撤掉后语义必须落在 aria 上——`aria-label` 供读屏，`title`
+             供鼠标悬停解释，两者同文案。
+             图标走 `PanelIcon`（= ui-frame `NeumorphismIcon` 的薄封装：几何来自
+             ui-frame 注册表，另加 Panel 的语义色调）：**扩展只能导入 Panel 的
+             import map 里登记过的裸标识符**，而 `components/NeumorphismIcon`
+             目前不在 `panel-shared.entries.json` 里——直接 import ui-frame 的
+             组件会在运行期解析失败（构建期不报错，报错发生在用户浏览器里）。 -->
         <NeumorphismButton
-          size="small"
-          variant="glass"
+          :size="32"
+          variant="raised"
+          class="wfb-ibtn"
           :disabled="!session || !roots.length"
+          aria-label="重新读取全部已展开目录"
           title="重新读取全部已展开目录"
           @click="refresh"
         >
-          刷新
+          <PanelIcon name="refresh" size="sm" />
         </NeumorphismButton>
         <NeumorphismButton
-          size="small"
-          variant="glass"
+          :size="32"
+          variant="raised"
+          class="wfb-ibtn"
           :disabled="!expanded.size"
+          aria-label="折叠全部目录"
           title="折叠全部目录"
           @click="collapseAll"
         >
-          折叠
+          <PanelIcon name="minimize" size="sm" />
         </NeumorphismButton>
       </div>
     </div>
@@ -404,6 +419,83 @@ function formatSize(size: number): string {
 }
 .wfb-title { font-size: 12px; font-weight: 700; color: var(--nm-text-primary); }
 .wfb-actions { display: flex; gap: 6px; }
+
+/* 卡头图标钮的外框（2026-11）：26×26 / 圆角 8px，与「当前会话」卡的刷新钮
+   （`SessionContextCard` 的 `.session-context__refresh`）逐像素一致。
+
+   为什么要覆盖而不是传 prop：`NeumorphismButton` 的 `size` 只有 small(32px)
+   / medium(44px) / large(56px) 三档，没有 26px；`shape="circle"` 更是锁在
+   `--nm-button-min-height`（44px）。26px 不在枚举档内，属于**这一个位置**
+   的尺寸，所以用局部选择器收口，不去挑战库的档位体系。
+
+   选择器写成 `.wfb-actions .wfb-ibtn`（0,2,0）：要盖住组件内的
+   `.nm-button--small { min-height: 32px; padding: … }` 与
+   `.nm-button--rounded { border-radius: 16px }`（各 0,1,0）。`min-width` 也要
+   显式给——small 档在 `(pointer: coarse)` 下被 `nm-touch-min` 抬到 44px，
+  媒体查询不加特异性，这条规则同样盖得住它。 */
+.wfb-actions .wfb-ibtn {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  border-radius: var(--nm-border-radius-sm);
+}
+
+/* 图标钮的高度模型（2026-11）：静止 = 0，悬停 = +，按下 = −。
+   三态只动 `box-shadow` 与 `transform`，不碰尺寸——26px 是固定档，按下时若改
+   宽高会带动卡头高度抖动。
+
+   材质是 `variant="raised"`（实色新拟态），不是玻璃档：
+   - 玻璃档的半透明底 + `backdrop-filter` 在卡片底色上等于没底，静止态必须靠
+     1px 高光描边才看得见按钮，那描边本身就是一层"假立体"；而且悬停/按下两态
+     都被本文件的规则接管，玻璃真正的价值（磨砂）只剩一层看不见的模糊。
+   - `raised` 的实色底（`--nm-surface-color`）自带轮廓，静止态可以做到**真·高度
+     0**：没有投影，也没有为了"看得见"而加的描边。
+
+   三态的深度（26px 小钮，深度整体收一档——库内 `nm-raised` 的 4px/8px 是给
+   44px 按钮的，用在 26px 上像个凸出来的方块）：
+   - 静止 0：`box-shadow: none`，贴平；焦点环改由 `outline` 画（见下），不占用
+     `box-shadow`——否则静止态的 none 会把库自带的 focus 环一起抹掉。
+   - 悬停 +：`2px 2px 5px` 暗 + `-2px -2px 5px` 亮（凸起双阴影，与
+     `nm-raised-strong` 同公式，深度减半），配 `translateY(-1px)`。
+   - 按下 −：反向 `inset 2px 2px 4px` / `inset -2px -2px 4px`，视觉陷进表面。
+
+   都带 `:not(.nm-button--disabled)`：禁用钮不该因悬停浮起来。
+
+   三条规则写成**平铺选择器**而不是嵌套 `&`：本文件 `<style scoped>` 是纯 CSS
+   （无 `lang="scss"`），嵌套要靠浏览器原生 CSS nesting——能跑，但与文件内其余
+   两百行平铺写法不一致，且多一层兼容面。 */
+.wfb-actions .wfb-ibtn {
+  box-shadow: none;
+  transition:
+    box-shadow 0.2s ease,
+    transform 0.2s ease;
+}
+
+/* 焦点环独立画：静止态把 `box-shadow` 清零了，库自带的 `:focus-visible` 环
+   也走 `box-shadow`，会被一起抹掉。用 `outline` 补回来——它不占布局、也不与
+   深度模型抢同一个属性。 */
+.wfb-actions .wfb-ibtn:focus-visible {
+  outline: 2px solid var(--nm-primary-color);
+  outline-offset: 2px;
+}
+
+@media (hover: hover) {
+  .wfb-actions .wfb-ibtn:not(.nm-button--disabled):hover {
+    transform: translateY(-1px);
+    box-shadow:
+      2px 2px 5px var(--nm-shadow-dark),
+      -2px -2px 5px var(--nm-shadow-light);
+  }
+}
+
+.wfb-actions .wfb-ibtn:not(.nm-button--disabled):active {
+  transform: translateY(0);
+  box-shadow:
+    inset 2px 2px 4px var(--nm-shadow-dark-deep),
+    inset -2px -2px 4px var(--nm-shadow-light-deep);
+}
 
 /* 悬停速览（绝对路径）。
    注意：本节是 Teleport 到 body 的节点，**不属于 rail 卡片**——scoped 样式

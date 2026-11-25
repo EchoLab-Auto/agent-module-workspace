@@ -67,10 +67,20 @@ function rowButton(wrapper: ReturnType<typeof mount>, text: string) {
   return wrapper.findAll('button.wfb-tbtn').find((b) => b.text().includes(text));
 }
 
-/** 工具栏按钮（NeumorphismButton）按文本精确查找。 */
-function toolbarButton(wrapper: ReturnType<typeof mount>, text: string) {
-  return wrapper.findAll('button').find((b) => b.text().trim() === text);
+/**
+ * 工具栏按钮（NeumorphismButton，仅图标）按 `aria-label` 查找。
+ *
+ * 2026-11 改为图标钮后按钮里没有文字了，`text()` 匹配不到——断言必须落在
+ * aria 上（这也是组件侧必须给 `aria-label` 的原因：它是唯一的语义出口）。
+ */
+function toolbarButton(wrapper: ReturnType<typeof mount>, label: string) {
+  return wrapper.find(`button[aria-label="${label}"]`);
 }
+
+/** 工具栏「刷新」钮的 aria-label（组件与测试共用一份文案，改文案只改这里）。 */
+const REFRESH_LABEL = '重新读取全部已展开目录';
+/** 工具栏「折叠全部」钮的 aria-label。 */
+const COLLAPSE_LABEL = '折叠全部目录';
 
 describe('WorkspaceFileBrowser 文件浏览器（右侧边栏）', () => {
   beforeEach(() => {
@@ -240,19 +250,48 @@ describe('WorkspaceFileBrowser 文件浏览器（右侧边栏）', () => {
 
     // 刷新 → 已展开的两个目录都重读
     vi.mocked(sendCommand).mockClear();
-    await toolbarButton(wrapper, '刷新')!.trigger('click');
+    await toolbarButton(wrapper, REFRESH_LABEL)!.trigger('click');
     expect(requestedPaths().sort()).toEqual(['/srv/core', '/srv/core/src']);
 
     // 折叠全部 → 无展开行
-    await toolbarButton(wrapper, '折叠')!.trigger('click');
+    await toolbarButton(wrapper, COLLAPSE_LABEL)!.trigger('click');
     await nextTick();
     expect(wrapper.findAll('.wfb-trow.is-open').length).toBe(0);
 
     // 全折叠时刷新 → 重开首个根
     vi.mocked(sendCommand).mockClear();
-    await toolbarButton(wrapper, '刷新')!.trigger('click');
+    await toolbarButton(wrapper, REFRESH_LABEL)!.trigger('click');
     expect(requestedPaths()).toEqual(['/srv/core']);
     expect(wrapper.find('.wfb-trow--root.is-open')).toBeTruthy();
     wrapper.unmount();
+  });
+
+  it('工具栏两个钮是图标钮：文字撤掉，语义落在 aria 上', async () => {
+    seed([{ id: 'core', name: '框架', directories: ['/srv/core'] }]);
+    const wrapper = mountBrowser();
+    await nextTick();
+
+    const refresh = toolbarButton(wrapper, REFRESH_LABEL)!;
+    const collapse = toolbarButton(wrapper, COLLAPSE_LABEL)!;
+    expect(refresh.exists()).toBe(true);
+    expect(collapse.exists()).toBe(true);
+
+    // 图标来自 ui-frame 的 NeumorphismIcon（`svg.nm-icon`），不是内联 path
+    for (const [btn, iconName] of [
+      [refresh, 'refresh'],
+      [collapse, 'minimize'],
+    ] as const) {
+      const svg = btn.find('svg.nm-icon');
+      expect(svg.exists(), `${iconName} 图标`).toBe(true);
+      expect(svg.classes()).toContain(`nm-icon--${iconName}`);
+      // 14px 档（`size="sm"`）：与「当前会话」卡的刷新钮同尺寸
+      expect(svg.attributes('width')).toBe('14');
+      // 外框尺寸靠这个类收口（26×26 / 圆角 8px），见组件样式段注释。
+      // 具体像素值无法在 happy-dom 里断言（SFC 的 scoped 样式不参与单测），
+      // 所以这里钉住「两个钮都挂了这个类」——样式规则落在它上面。
+      expect(btn.classes()).toContain('wfb-ibtn');
+      // 文字已撤掉：按钮内容只有图标（没有可读文本，读屏只能走 aria-label）
+      expect(btn.text().trim()).toBe('');
+    }
   });
 });

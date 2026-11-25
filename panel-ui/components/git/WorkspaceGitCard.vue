@@ -350,7 +350,7 @@ onBeforeUnmount(() => {
         </span>
       </span>
       <NeumorphismButton
-        size="small"
+        :size="32"
         variant="glass"
         :loading="loading"
         :disabled="loading || !state.connected || !session"

@@ -72,6 +72,26 @@ panel-ui/
 | 文件浏览器 | `WorkspaceFilesRail` → `WorkspaceFileBrowser` | 限会话已声明目录及其子孙（canonical 前缀校验在后端） |
 | Git 状态 | `WorkspaceGitCard` → `WorkspaceGitDir` | 每目录一行：分支 + 领先落后 + 冲突角标 + 三类变更计数；点击展开类别开关、过滤框、父目录、最近提交 |
 
+**文件浏览器的卡头钮是图标钮**（2026-11）：刷新（`refresh`）与折叠全部（`minimize`）撤掉文字，外框 **26×26 / 圆角 8px / 14px 图标**，与「当前会话」卡的刷新钮（`SessionContextCard` 的 `.session-context__refresh`）逐像素一致——同一右栏里两处刷新不出两套尺寸。文字撤掉后语义**必须**落在 aria 上：`aria-label` 供读屏、`title` 供悬停解释，两者同文案；测试因此按 `button[aria-label]` 定位而不是按文本。
+
+**高度模型**（2026-11）：静止 = 0、悬停 = +、按下 = −。三态只动 `box-shadow` 与 `transform`，不碰尺寸——26px 是固定档，按下若改宽高会带动卡头抖动。
+
+| 态 | 阴影（26px 小钮，深度整体比库内矮一档） | 位移 |
+|---|---|---|
+| 静止（0） | `none`——贴平，无投影也无需描边 | 无 |
+| 悬停（+） | 凸起双阴影 `2px 2px 5px` 暗 / `-2px -2px 5px` 亮 | `translateY(-1px)` |
+| 按下（−） | 反向内阴影 `inset 2px 2px 4px` 暗 / `inset -2px -2px 4px` 亮 | 归零 |
+
+**材质用 `variant="raised"`，不是 `glass`**：玻璃档是半透明底 + `backdrop-filter`，在卡片底色上等于没底，静止态必须靠 1px 高光描边才看得见按钮——那描边本身就是一层假立体；而它的悬停/按下两态已被本文件的规则接管，磨砂只剩一层看不见的模糊。`raised` 的实色底（`--nm-surface-color`）自带轮廓，静止态才能做到真·高度 0。
+
+深度取 2px 而不是库内 `nm-raised` 的 4px/8px：那套是给 44px 按钮的，用在 26px 上像个凸出来的方块。
+
+**焦点环改用 `outline`**：静止态把 `box-shadow` 清零，而库自带的 `:focus-visible` 环也走 `box-shadow`，会被一起抹掉。故 `.wfb-ibtn:focus-visible` 用 `outline: 2px solid var(--nm-primary-color)` + `outline-offset: 2px` 补回——`outline` 不占布局，也不与深度模型抢同一个属性。
+
+26px 不在 `NeumorphismButton` 的档位枚举里（small 32 / medium 44 / large 56，`shape="circle"` 锁 44），所以用局部类 `.wfb-ibtn` 覆盖：`width/height/min-width/min-height: 26px` + `padding: 0` + `border-radius: var(--nm-border-radius-sm)`。选择器写成 `.wfb-actions .wfb-ibtn`（0,2,0）才盖得住组件内的 `.nm-button--small`（32px 高）与 `.nm-button--rounded`（16px 圆角）；`min-*` 也必须显式给——small 档在 `(pointer: coarse)` 下会被 `nm-touch-min` 抬到 44px，媒体查询不加特异性。
+
+图标为什么走 `PanelIcon` 而不是 `NeumorphismIcon`：扩展产物里对 ui-frame 的 import 是 **external**，由面板的 import map 在运行期解析，而 import map 的清单是**固定白名单**（`panel-shared.entries.json`，只有 Button / Select / Spinner / Tag 与根入口），`components/NeumorphismIcon` 不在其中——直接 import 会构建通过、运行期解析失败。`PanelIcon` 本身是 `NeumorphismIcon` 的薄封装（几何来自 ui-frame 注册表），所以图标体系仍是同一份。要在扩展里直接用 `NeumorphismIcon`，得往该白名单加一项并升 `PANEL_UI_SDK_VERSION`，四个模块 UI 都要跟着重建。
+
 Git 卡的计数是**各目录变更文件数之和**（`railCards` 里聚合，按文件去重），即边栏标题上的徽标。展开后计数本身是开关：点「已修改 4」列出那 4 个文件及 porcelain 状态字符。变更 ≤ 6 个文件的目录展开后自动铺开，再多只留计数。
 
 **多目录的一屏效率**：顶部一句汇总（几仓库 / 多少变更 / 几个冲突）+「只看变更」开关，把干净的仓库暂时收起；非仓库 / 读失败的行永远保留（那是错误，不是「没改动」）。明细超过 8 条时出现过滤框，按路径子串过滤已铺开的行（不改计数）。
