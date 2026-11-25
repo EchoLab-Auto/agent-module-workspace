@@ -286,10 +286,12 @@ describe('WorkspaceFileBrowser 文件浏览器（右侧边栏）', () => {
       expect(svg.classes()).toContain(`nm-icon--${iconName}`);
       // 14px 档（`size="sm"`）：与「当前会话」卡的刷新钮同尺寸
       expect(svg.attributes('width')).toBe('14');
-      // 外框尺寸靠这个类收口（26×26 / 圆角 8px），见组件样式段注释。
-      // 具体像素值无法在 happy-dom 里断言（SFC 的 scoped 样式不参与单测），
-      // 所以这里钉住「两个钮都挂了这个类」——样式规则落在它上面。
-      expect(btn.classes()).toContain('wfb-ibtn');
+      // 外框尺寸与三态不再由本组件收口，而是库的 `ghost` + `square`（2026-11）：
+      // 26px 方钮、透明底、悬停凸起 / 按下内凹。具体像素值断言不了（SFC 的
+      // scoped 样式与库样式都不进 happy-dom），所以钉住「档位类挂上了」——
+      // 视觉规则落在库的这两个类上，与 Shell / 当前会话 / Git 卡同一份实现。
+      expect(btn.classes()).toContain('nm-button--ghost');
+      expect(btn.classes()).toContain('nm-button--square');
       // 文字已撤掉：按钮内容只有图标（没有可读文本，读屏只能走 aria-label）
       expect(btn.text().trim()).toBe('');
     }

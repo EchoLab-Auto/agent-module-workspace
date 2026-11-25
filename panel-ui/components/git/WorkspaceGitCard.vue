@@ -349,16 +349,20 @@ onBeforeUnmount(() => {
           {{ repoCount }}
         </span>
       </span>
+      <!-- 图标钮走库的 `ghost` + `square`（2026-11）：透明底跟随卡片底色、26px
+           方钮，与 Shell / 当前会话 / 文件浏览器的卡头按钮同一档。此前是
+           `variant="glass"` 32px——玻璃底比卡片亮一块，且四处尺寸不一。 -->
       <NeumorphismButton
-        :size="32"
-        variant="glass"
+        :size="26"
+        variant="ghost"
+        shape="square"
         :loading="loading"
         :disabled="loading || !state.connected || !session"
         :aria-label="loading ? '正在读取 git 状态' : '刷新 git 状态'"
         :title="loading ? '正在读取…' : '重新读取各目录的 git 状态'"
         @click="request()"
       >
-        <PanelIcon name="refresh" size="xs" />
+        <PanelIcon name="refresh" size="sm" />
       </NeumorphismButton>
     </div>
 

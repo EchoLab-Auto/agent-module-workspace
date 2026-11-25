@@ -285,9 +285,10 @@ function formatSize(size: number): string {
       <div class="wfb-actions">
         <!-- 卡头图标钮（2026-11）：外框 26×26 / 圆角 8px / 14px 图标——与
              「当前会话」卡的刷新钮（`SessionContextCard` 的 `.session-context__refresh`）
-             逐像素同形，同一右栏里两处刷新不出现两套尺寸。
-             背景透明（不画自己的底，跟随卡片底色）；`raised` 只是语义占位，
-             三个视觉态全部由样式段「高度模型」接管。
+             图形走库的 `variant="ghost" shape="square" :size="26"`（2026-11）：
+             透明底（材质取自卡片，不需要复制任何混合比例）、26px 方钮、三态只
+             表达深度。同一套规则在 Shell / 当前会话 / Git 卡复用——此前这里是
+             一整段局部 CSS 覆盖，四处各写一遍就会各自漂。
              文字撤掉后语义必须落在 aria 上——`aria-label` 供读屏，`title`
              供鼠标悬停解释，两者同文案。
              图标走 `PanelIcon`（= ui-frame `NeumorphismIcon` 的薄封装：几何来自
@@ -296,9 +297,9 @@ function formatSize(size: number): string {
              目前不在 `panel-shared.entries.json` 里——直接 import ui-frame 的
              组件会在运行期解析失败（构建期不报错，报错发生在用户浏览器里）。 -->
         <NeumorphismButton
-          :size="32"
-          variant="raised"
-          class="wfb-ibtn"
+          :size="26"
+          variant="ghost"
+          shape="square"
           :disabled="!session || !roots.length"
           aria-label="重新读取全部已展开目录"
           title="重新读取全部已展开目录"
@@ -307,9 +308,9 @@ function formatSize(size: number): string {
           <PanelIcon name="refresh" size="sm" />
         </NeumorphismButton>
         <NeumorphismButton
-          :size="32"
-          variant="raised"
-          class="wfb-ibtn"
+          :size="26"
+          variant="ghost"
+          shape="square"
           :disabled="!expanded.size"
           aria-label="折叠全部目录"
           title="折叠全部目录"
@@ -421,87 +422,11 @@ function formatSize(size: number): string {
 .wfb-title { font-size: 12px; font-weight: 700; color: var(--nm-text-primary); }
 .wfb-actions { display: flex; gap: 6px; }
 
-/* 卡头图标钮的外框（2026-11）：26×26 / 圆角 8px，与「当前会话」卡的刷新钮
-   （`SessionContextCard` 的 `.session-context__refresh`）逐像素一致。
-
-   为什么要覆盖而不是传 prop：`NeumorphismButton` 的 `size` 只有 small(32px)
-   / medium(44px) / large(56px) 三档，没有 26px；`shape="circle"` 更是锁在
-   `--nm-button-min-height`（44px）。26px 不在枚举档内，属于**这一个位置**
-   的尺寸，所以用局部选择器收口，不去挑战库的档位体系。
-
-   选择器写成 `.wfb-actions .wfb-ibtn`（0,2,0）：要盖住组件内的
-   `.nm-button--small { min-height: 32px; padding: … }` 与
-   `.nm-button--rounded { border-radius: 16px }`（各 0,1,0）。`min-width` 也要
-   显式给——small 档在 `(pointer: coarse)` 下被 `nm-touch-min` 抬到 44px，
-  媒体查询不加特异性，这条规则同样盖得住它。 */
-.wfb-actions .wfb-ibtn {
-  width: 26px;
-  height: 26px;
-  min-width: 26px;
-  min-height: 26px;
-  padding: 0;
-  border-radius: var(--nm-border-radius-sm);
-}
-
-/* 图标钮的高度模型（2026-11）：静止 = 0，悬停 = +，按下 = −。
-   三态只动 `box-shadow` 与 `transform`，不碰尺寸——26px 是固定档，按下时若改
-   宽高会带动卡头高度抖动。
-
-   **背景透明**（2026-11，用户要求与卡片同色）：按钮不画自己的底，显示的就是
-   卡片底——**在数学上必然相等**。不去"复制"卡片背景的具体配方（无论是现在的
-   实色 `--nm-surface-color`，还是此前的玻璃 `--nm-glass-bg` 混合比例）：抄来
-   的值只要卡片换一次材质就再次漂移，而透明永远跟随。
-
-   于是三态里"材质"由卡片提供，按钮只贡献深度：
-   - 静止 0：无背景、无投影 → 完全融入卡片，只有一个图标
-   - 悬停 +：`2px 2px 5px` 暗 + `-2px -2px 5px` 亮（凸起双阴影，与
-     `nm-raised-strong` 同公式，深度减半），配 `translateY(-1px)`
-   - 按下 −：反向 `inset 2px 2px 4px` / `inset -2px -2px 4px`，陷进卡片表面
-
-   深度整体比库内矮一档：`nm-raised` 的 4px/8px 是给 44px 按钮的，用在 26px 上
-   像个凸出来的方块。
-
-   静止态的 `box-shadow: none` 会把库自带的 focus 环一起抹掉（它也走
-   `box-shadow`），所以焦点环改由 `outline` 画（见下）。
-
-   都带 `:not(.nm-button--disabled)`：禁用钮不该因悬停浮起来。
-
-   三条规则写成**平铺选择器**而不是嵌套 `&`：本文件 `<style scoped>` 是纯 CSS
-   （无 `lang="scss"`），嵌套要靠浏览器原生 CSS nesting——能跑，但与文件内其余
-   两百行平铺写法不一致，且多一层兼容面。 */
-.wfb-actions .wfb-ibtn {
-  /* 覆盖 `.nm-button` 基类的 `background-color: var(--nm-surface-color)` */
-  background-color: transparent;
-  box-shadow: none;
-  transition:
-    box-shadow 0.2s ease,
-    transform 0.2s ease;
-}
-
-/* 焦点环独立画：静止态把 `box-shadow` 清零了，库自带的 `:focus-visible` 环
-   也走 `box-shadow`，会被一起抹掉。用 `outline` 补回来——它不占布局、也不与
-   深度模型抢同一个属性。 */
-.wfb-actions .wfb-ibtn:focus-visible {
-  outline: 2px solid var(--nm-primary-color);
-  outline-offset: 2px;
-}
-
-@media (hover: hover) {
-  .wfb-actions .wfb-ibtn:not(.nm-button--disabled):hover {
-    transform: translateY(-1px);
-    box-shadow:
-      2px 2px 5px var(--nm-shadow-dark),
-      -2px -2px 5px var(--nm-shadow-light);
-  }
-}
-
-.wfb-actions .wfb-ibtn:not(.nm-button--disabled):active {
-  transform: translateY(0);
-  box-shadow:
-    inset 2px 2px 4px var(--nm-shadow-dark-deep),
-    inset -2px -2px 4px var(--nm-shadow-light-deep);
-}
-
+/* 卡头图标钮：尺寸（26px 方钮）、透明底与三态深度**一条都不在这里写**。
+   全部由库的 `variant="ghost" shape="square"` 提供（ui-frame 2026-11）——
+   同一套规则同时服务 Shell / 当前会话 / Git 卡，这里再复写一遍就多一处漂移源。
+   此前本段是 84 行局部覆盖（26×26 外框 + 高度模型 + focus 环 + 悬停/按下），
+   其中「size 只有三档」的注释在 ui-frame 改成 px 数字后已不成立。 */
 /* 悬停速览（绝对路径）。
    注意：本节是 Teleport 到 body 的节点，**不属于 rail 卡片**——scoped 样式
    通过组件 id 属性仍能命中（Vue 给 teleport 内容加同一 scope id）。
