@@ -1,4 +1,5 @@
 ---
+prodoc: true
 id: panel-ui
 title: "Panel UI 扩展"
 group: 前端

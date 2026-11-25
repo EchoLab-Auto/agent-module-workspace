@@ -1,4 +1,5 @@
 ---
+prodoc: true
 id: module
 title: "模块与宿主接缝"
 group: 后端

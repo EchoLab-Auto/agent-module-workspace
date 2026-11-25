@@ -1,4 +1,5 @@
 ---
+prodoc: true
 id: index
 title: "工作区会话模块"
 group: 总览

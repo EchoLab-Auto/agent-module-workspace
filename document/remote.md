@@ -1,4 +1,5 @@
 ---
+prodoc: true
 id: remote
 title: "跨机目录"
 group: 后端

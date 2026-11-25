@@ -1,4 +1,5 @@
 ---
+prodoc: true
 id: commands
 title: "命令域与工具"
 group: 后端
