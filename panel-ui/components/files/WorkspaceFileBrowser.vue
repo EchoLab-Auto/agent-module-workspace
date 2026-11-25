@@ -286,7 +286,8 @@ function formatSize(size: number): string {
         <!-- 卡头图标钮（2026-11）：外框 26×26 / 圆角 8px / 14px 图标——与
              「当前会话」卡的刷新钮（`SessionContextCard` 的 `.session-context__refresh`）
              逐像素同形，同一右栏里两处刷新不出现两套尺寸。
-             材质用 `raised`（实色凸起）而不是 `glass`：见样式段「高度模型」的说明。
+             背景透明（不画自己的底，跟随卡片底色）；`raised` 只是语义占位，
+             三个视觉态全部由样式段「高度模型」接管。
              文字撤掉后语义必须落在 aria 上——`aria-label` 供读屏，`title`
              供鼠标悬停解释，两者同文案。
              图标走 `PanelIcon`（= ui-frame `NeumorphismIcon` 的薄封装：几何来自
@@ -446,20 +447,22 @@ function formatSize(size: number): string {
    三态只动 `box-shadow` 与 `transform`，不碰尺寸——26px 是固定档，按下时若改
    宽高会带动卡头高度抖动。
 
-   材质是 `variant="raised"`（实色新拟态），不是玻璃档：
-   - 玻璃档的半透明底 + `backdrop-filter` 在卡片底色上等于没底，静止态必须靠
-     1px 高光描边才看得见按钮，那描边本身就是一层"假立体"；而且悬停/按下两态
-     都被本文件的规则接管，玻璃真正的价值（磨砂）只剩一层看不见的模糊。
-   - `raised` 的实色底（`--nm-surface-color`）自带轮廓，静止态可以做到**真·高度
-     0**：没有投影，也没有为了"看得见"而加的描边。
+   **背景透明**（2026-11，用户要求与卡片同色）：按钮不画自己的底，显示的就是
+   卡片底——**在数学上必然相等**。不去"复制"卡片背景的具体配方（无论是现在的
+   实色 `--nm-surface-color`，还是此前的玻璃 `--nm-glass-bg` 混合比例）：抄来
+   的值只要卡片换一次材质就再次漂移，而透明永远跟随。
 
-   三态的深度（26px 小钮，深度整体收一档——库内 `nm-raised` 的 4px/8px 是给
-   44px 按钮的，用在 26px 上像个凸出来的方块）：
-   - 静止 0：`box-shadow: none`，贴平；焦点环改由 `outline` 画（见下），不占用
-     `box-shadow`——否则静止态的 none 会把库自带的 focus 环一起抹掉。
+   于是三态里"材质"由卡片提供，按钮只贡献深度：
+   - 静止 0：无背景、无投影 → 完全融入卡片，只有一个图标
    - 悬停 +：`2px 2px 5px` 暗 + `-2px -2px 5px` 亮（凸起双阴影，与
-     `nm-raised-strong` 同公式，深度减半），配 `translateY(-1px)`。
-   - 按下 −：反向 `inset 2px 2px 4px` / `inset -2px -2px 4px`，视觉陷进表面。
+     `nm-raised-strong` 同公式，深度减半），配 `translateY(-1px)`
+   - 按下 −：反向 `inset 2px 2px 4px` / `inset -2px -2px 4px`，陷进卡片表面
+
+   深度整体比库内矮一档：`nm-raised` 的 4px/8px 是给 44px 按钮的，用在 26px 上
+   像个凸出来的方块。
+
+   静止态的 `box-shadow: none` 会把库自带的 focus 环一起抹掉（它也走
+   `box-shadow`），所以焦点环改由 `outline` 画（见下）。
 
    都带 `:not(.nm-button--disabled)`：禁用钮不该因悬停浮起来。
 
@@ -467,6 +470,8 @@ function formatSize(size: number): string {
    （无 `lang="scss"`），嵌套要靠浏览器原生 CSS nesting——能跑，但与文件内其余
    两百行平铺写法不一致，且多一层兼容面。 */
 .wfb-actions .wfb-ibtn {
+  /* 覆盖 `.nm-button` 基类的 `background-color: var(--nm-surface-color)` */
+  background-color: transparent;
   box-shadow: none;
   transition:
     box-shadow 0.2s ease,
