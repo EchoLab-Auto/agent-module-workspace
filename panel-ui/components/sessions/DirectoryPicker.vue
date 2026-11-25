@@ -31,10 +31,21 @@ const emit = defineEmits<{
   (e: 'close'): void;
 }>();
 
+/**
+ * 从编辑串推出初始位置：`node://<peer>/…` → 该 peer，其它 → `local`。
+ *
+ * 不能直接把 `initial` 当位置用（此前的写法）：编辑一个**本机**目录时传进来
+ * 的是 `/root/xxx`，会被当成 peer 名——位置下拉里于是出现一个不存在的节点，
+ * 列表直接空。
+ */
+function locationOfInitial(input: string | null | undefined): string {
+  if (!input) return 'local';
+  if (!input.startsWith('node://')) return 'local';
+  return input.slice('node://'.length).split('/')[0] || 'local';
+}
+
 /** 位置：`local` 或联邦 peer 名。 */
-const location = ref<string>(
-  props.initial && props.initial !== 'local' ? props.initial : 'local',
-);
+const location = ref<string>(locationOfInitial(props.initial));
 
 /** 在线联邦节点（位置可选项）。 */
 const peerNames = computed(() =>
@@ -100,6 +111,12 @@ function jump(index: number) {
   browse(requestPath());
 }
 
+/** 回根视图（面包屑首项）。`jump(-1)` 走不通——它对负数直接 return。 */
+function goRoots() {
+  stack.value = [];
+  browse(rootsRequestPath.value);
+}
+
 function goUp() {
   if (!stack.value.length) return;
   if (stack.value.length === 1) {
@@ -125,17 +142,22 @@ function selectCurrent() {
 // 打开时拉首屏（根列表）。
 browse(rootsRequestPath.value);
 
-/** 路径展示：去掉 node:// 前缀的简洁形式（hover 显示完整）。 */
+/**
+ * 路径展示：去掉 `node://` 前缀的简洁形式。
+ *
+ * 完整串放在 `title`（悬停可见）：行内空间给 `node://` 前缀是纯浪费，但
+ * **去掉后不能丢信息**——用户要能把「这是哪台机器上的哪个目录」一眼看全。
+ */
 function displayPath(path: string): string {
-  return path;
+  return path.startsWith('node://') ? path.slice('node://'.length) : path;
 }
 
 watch(
   () => props.initial,
   (next) => {
     if (next && next.startsWith('node://')) {
-      const peer = next.slice('node://'.length).split('/')[0];
-      if (peer) {
+      const peer = locationOfInitial(next);
+      if (peer !== 'local') {
         location.value = peer;
         stack.value = [];
         browse(rootsRequestPath.value);
@@ -175,7 +197,7 @@ watch(
 
       <!-- 面包屑：位置 > 各级目录；栈空显示根视图 -->
       <div class="dp-crumbs">
-        <button class="dp-crumb" @click="jump(-1)">
+        <button class="dp-crumb" @click="goRoots">
           {{ location === 'local' ? '本机' : location }}
         </button>
         <template v-for="(item, index) in stack" :key="item.path">
@@ -207,7 +229,7 @@ watch(
               v-for="root in roots"
               :key="root.path"
               class="dp-row"
-              :title="displayPath(root.path)"
+              :title="root.path"
               @click="select(root.path)"
             >
               <PanelIcon name="home" size="sm" class="dp-row__icon" />
@@ -225,7 +247,7 @@ watch(
               v-for="entry in entries"
               :key="entry.path"
               class="dp-row"
-              :title="displayPath(entry.path)"
+              :title="entry.path"
               @click="select(entry.path)"
             >
               <PanelIcon name="folder" size="sm" class="dp-row__icon" />

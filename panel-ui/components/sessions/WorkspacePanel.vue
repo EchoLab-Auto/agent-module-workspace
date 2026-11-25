@@ -243,6 +243,22 @@ function save() {
 // ── 目录选择器（2026-10）：浏览本机/联邦节点目录树挑选 ──
 const pickerOpen = ref(false);
 
+/**
+ * 选择器的初始位置：编辑串里第一个跨机目录（`node://peer/…`）。
+ *
+ * 此前挂载时不传 `initial`，于是编辑一个联邦目录再点「浏览…」永远从**本机**
+ * 根开始——用户得自己在下拉里重新挑节点（2026-11 联邦浏览故障的体验面）。
+ * 优先跨机目录而不是第一行：编辑本机目录时选择器留在「本机」正好，而一旦
+ * 有过 `node://` 目录，意图通常是继续在那个节点上挑。
+ */
+const pickerInitial = computed<string | null>(() => {
+  const remote = formDirs.value
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('node://'));
+  return remote ?? null;
+});
+
 /** 选择器回填：追加一行目录到编辑框（去重，保留手写能力）。 */
 function onPickDirectory(path: string) {
   const lines = formDirs.value
@@ -727,6 +743,7 @@ watch(
   <!-- 目录选择器（2026-10）：浏览本机/联邦节点目录树 -->
   <DirectoryPicker
     v-if="pickerOpen"
+    :initial="pickerInitial"
     @select="onPickDirectory"
     @close="pickerOpen = false"
   />

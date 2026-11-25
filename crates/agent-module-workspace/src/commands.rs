@@ -875,6 +875,23 @@ async fn browse(state: &ModuleState, payload: &Value) -> Result<Value, String> {
     Ok(Value::Null)
 }
 
+/// 把对端回的路径（对端本机绝对路径）改写成 `node://<peer>/<path>`。
+///
+/// 对端只知道自己那台机器的路径（`/srv/repo`）。原样透传会让面板把后续
+/// 「进入这个目录」的请求当成**本机**路径发出去——本机恰好有同名目录就静默
+/// 串台（用户以为在看对端，其实在看自己），否则报「路径不在浏览根内」。
+/// git 那条链路早就在做同一件事（`decode_remote_git` 把 `directory` 换成
+/// qualified 写法），文件清单与目录浏览这两条此前漏了（2026-11）。
+///
+/// 已经带 `node://` 前缀的保持原样：联邦只有一层，理论上不会出现，但真出现
+/// 时再叠一层会拼出 `node://a/node://b/...` 这种没人能解析的串。
+fn qualify_remote_path(peer: &str, path: &str) -> String {
+    if path.starts_with("node://") {
+        return path.to_string();
+    }
+    crate::remote::join_node_path(peer, path)
+}
+
 /// 远程目录的文件清单（`(entries, error)`，两者互斥地表达成功与失败）。
 ///
 /// 错误**不外抛**：`WorkspaceFiles` 事件里的 `error` 字段是面板错误条的
@@ -891,7 +908,14 @@ async fn remote_files(
         Ok(payload) => {
             let raw = payload.get("entries").cloned().unwrap_or(Value::Null);
             match serde_json::from_value::<Vec<WorkspaceFileEntry>>(raw) {
-                Ok(entries) => (entries, None),
+                Ok(mut entries) => {
+                    // 面板拿 `entry.path` 直接当下一层请求的 path（文件浏览器
+                    // 的展开键也是它），必须回写成跨机写法。
+                    for entry in &mut entries {
+                        entry.path = qualify_remote_path(peer, &entry.path);
+                    }
+                    (entries, None)
+                }
                 Err(error) => (
                     Vec::new(),
                     Some(format!(
@@ -909,6 +933,10 @@ async fn remote_files(
 /// 根列表请求由模块侧先解析：`node://<peer>/` 剥完前缀是 `"/"`，对端把
 /// `"/"` 与空串都当"列根"，所以这里不做额外归一化——两端口径一致，
 /// 多一层本地特判只会在对端换实现时对不上。
+///
+/// 回包里的 `roots[].path` / `entries[].path` 一律改写成 `node://<peer>/…`
+/// （见 [`qualify_remote_path`]）：面板把它们原样作为下一次浏览/选择的值，
+/// 少了这一步就等于「点进对端目录 → 变成浏览本机同名路径」。
 async fn remote_browse(
     state: &ModuleState,
     peer: &str,
@@ -931,7 +959,15 @@ async fn remote_browse(
                 .transpose();
             match (roots, entries) {
                 (Ok(roots), Ok(entries)) => {
-                    (roots.unwrap_or_default(), entries.unwrap_or_default(), None)
+                    let mut roots = roots.unwrap_or_default();
+                    let mut entries = entries.unwrap_or_default();
+                    for root in &mut roots {
+                        root.path = qualify_remote_path(peer, &root.path);
+                    }
+                    for entry in &mut entries {
+                        entry.path = qualify_remote_path(peer, &entry.path);
+                    }
+                    (roots, entries, None)
                 }
                 (Err(error), _) | (_, Err(error)) => (
                     Vec::new(),
@@ -1379,6 +1415,9 @@ mod tests {
             .find_map(|value| value.get("WorkspaceFiles").cloned())
             .expect("应有 WorkspaceFiles 事件");
         assert_eq!(event["entries"][0]["name"], "Cargo.toml");
+        // 路径回写成跨机写法：面板拿 entry.path 当下一层请求的 path，
+        // 原样回对端本机路径会让「展开子目录」变成浏览本机同名路径。
+        assert_eq!(event["entries"][0]["path"], "node://gpu-box/srv/repo/Cargo.toml");
         assert!(event["error"].is_null());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1419,7 +1458,11 @@ mod tests {
             .iter()
             .find_map(|value| value.get("BrowseDirectories").cloned())
             .expect("应有 BrowseDirectories 事件");
-        assert_eq!(event["roots"][0]["path"], "/srv");
+        assert_eq!(
+            event["roots"][0]["path"], "node://gpu-box/srv",
+            "对端回的是它自己的本机路径，必须改写成跨机写法，\
+             否则面板点进去就变成浏览本机同名目录（2026-11 联邦浏览故障）"
+        );
         assert!(event["error"].is_null());
         let _ = std::fs::remove_dir_all(&dir);
     }
