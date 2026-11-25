@@ -427,6 +427,7 @@ function formatSize(size: number): string {
    同一套规则同时服务 Shell / 当前会话 / Git 卡，这里再复写一遍就多一处漂移源。
    此前本段是 84 行局部覆盖（26×26 外框 + 高度模型 + focus 环 + 悬停/按下），
    其中「size 只有三档」的注释在 ui-frame 改成 px 数字后已不成立。 */
+
 /* 悬停速览（绝对路径）。
    注意：本节是 Teleport 到 body 的节点，**不属于 rail 卡片**——scoped 样式
    通过组件 id 属性仍能命中（Vue 给 teleport 内容加同一 scope id）。
