@@ -171,9 +171,19 @@ watch(
   <!-- Teleport 到 body（2026-10 审计修复）：本组件常挂在工作区面板
        （`SessionOverlay` 内）——外壳的 `backdrop-filter` 会把 fixed 后代的
        包含块改为自身、`overflow:auto` 再行裁剪，导致全屏遮罩只罩住面板、
-       @click.self 关闭大面积失效。teleport 后 fixed/inset 参照视口。 -->
+       @click.self 关闭大面积失效。teleport 后 fixed/inset 参照视口。
+
+       `data-panel-floating-layer`（2026-11，跨仓契约字面量）：teleport 之后
+       本组件的 DOM **不在**工作区面板的子树里，于是面板的「点外面关闭」会把
+       这里的一切按下都当成"外面"——点面包屑 / 目录行 / 甚至标题空白，都会先
+       把整个工作区面板卸掉（连带丢掉编辑表单里的输入），选择器自己反而来不及
+       响应。面板侧的 `floating-layer.ts` 认这个属性，命中的按下视同面板内部。
+
+       属性名是**两仓各自写死的约定的字面量**，不从 `@echo-agent/panel` import：
+       多一个导出会让"用新面板构建、被旧面板加载"的扩展在 import 阶段就抛，
+       整块 UI 消失——而这里需要的只是"旧面板不认这个属性 → 保持现状"。 -->
   <Teleport to="body">
-    <div class="dp-overlay" @click.self="emit('close')">
+    <div class="dp-overlay" data-panel-floating-layer @click.self="emit('close')">
     <div class="dp-panel">
       <div class="dp-head">
         <span class="dp-title">选择目录</span>
